@@ -1,0 +1,391 @@
+//! One task per device. Polls on interval, pushes to buffer, flushes on
+//! size/time, and flushes on shutdown before exiting.
+//!
+//! Overrun rule: if a poll takes longer than the interval, the next tick is
+//! skipped. This avoids hammering a slow device. Documented in
+//! `docs/data-lifecycle.md`.
+
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::Duration;
+
+use anyhow::Result;
+use chrono::Utc;
+use sqlx::PgPool;
+use tokio::sync::watch;
+use tracing::{info, warn};
+
+use netwatch_core::{
+    model::{Device, InterfaceRef, MetricKind, MetricReading, SampleRow},
+    oid::Oid,
+    snmp_value::SnmpValue,
+};
+use netwatch_profiles::{PollResponse, Profile};
+use netwatch_snmp::SnmpClient;
+
+use crate::buffer::Buffer;
+use crate::counters::CounterTracker;
+
+#[cfg(test)]
+#[path = "devices_task_tests.rs"]
+mod tests;
+
+struct PollState {
+    interfaces: Vec<InterfaceRef>,
+    interface_ids: HashMap<u32, i64>,
+    counters: CounterTracker,
+    buffer: Buffer,
+}
+
+struct PollOutcome {
+    samples: usize,
+    problems: usize,
+    snmp_probe: Option<(&'static str, Option<f64>, Option<&'static str>)>,
+}
+
+/// One poll cycle: request → SNMP get/walk → parse → buffer.
+async fn poll_once(
+    device: &Device,
+    profile: &dyn Profile,
+    client: &Arc<dyn SnmpClient>,
+    metric_ids: &HashMap<String, i32>,
+    state: &mut PollState,
+) -> Result<PollOutcome> {
+    let req = profile.request(&state.interfaces);
+    let mut values = Vec::new();
+    let mut problems = 0;
+    for oid in &req.gets {
+        match client.get(oid).await {
+            Ok(vb) => values.push(vb),
+            Err(e) => {
+                problems += 1;
+                warn!(device = %device.name, oid = %oid, error = %e, "GET failed");
+            }
+        }
+    }
+    for root in &req.walks {
+        match client.walk(root).await {
+            Ok(mut v) => values.append(&mut v),
+            Err(e) => {
+                problems += 1;
+                warn!(device = %device.name, root = %root, error = %e, "WALK failed");
+            }
+        }
+    }
+    for group in &req.optional_walk_groups {
+        for root in group {
+            match client.walk(root).await {
+                Ok(mut rows) if !rows.is_empty() => values.append(&mut rows),
+                Ok(_) => break,
+                Err(error) => {
+                    warn!(device = %device.name, %root, %error, "optional metric unavailable");
+                    break;
+                }
+            }
+        }
+    }
+
+    let has_counters = profile
+        .metrics()
+        .iter()
+        .any(|metric| metric.kind == MetricKind::Counter);
+    let uptime_oid = Oid::parse("1.3.6.1.2.1.1.3.0")?;
+    let discontinuity_oid = Oid::parse("1.3.6.1.2.1.31.1.1.1.19")?;
+    let mut uptime = None;
+    let mut discontinuities = HashMap::new();
+    let mut invalid_discontinuities = std::collections::HashSet::new();
+    let mut snmp_probe = None;
+    let now = if has_counters {
+        let started = tokio::time::Instant::now();
+        match client.get(&uptime_oid).await {
+            Ok((oid, SnmpValue::TimeTicks(value))) if oid == uptime_oid => {
+                uptime = Some(value);
+                snmp_probe = Some(("ok", Some(started.elapsed().as_secs_f64() * 1000.0), None));
+            }
+            Ok(_) => {
+                problems += 1;
+                snmp_probe = Some(("failed", None, Some("Invalid SNMP uptime response")));
+                warn!(device = %device.name, "invalid sysUpTime response; counter rates unavailable")
+            }
+            Err(error) => {
+                problems += 1;
+                snmp_probe = Some((
+                    "failed",
+                    None,
+                    Some("SNMP uptime request failed; see poller logs"),
+                ));
+                warn!(device = %device.name, %error, "sysUpTime request failed; counter rates unavailable")
+            }
+        }
+        let timestamp = Utc::now();
+        match client.walk(&discontinuity_oid).await {
+            Ok(values) => {
+                for (oid, value) in values {
+                    if oid.0.len() != discontinuity_oid.0.len() + 1
+                        || !discontinuity_oid.is_prefix_of(&oid)
+                    {
+                        problems += 1;
+                        warn!(device = %device.name, %oid, "invalid counter discontinuity index");
+                        continue;
+                    }
+                    if let SnmpValue::TimeTicks(value) = value {
+                        let index = oid.0[discontinuity_oid.0.len()];
+                        if invalid_discontinuities.contains(&index) {
+                            continue;
+                        }
+                        if discontinuities.insert(index, value).is_some() {
+                            problems += 1;
+                            warn!(device = %device.name, if_index = index, "duplicate counter discontinuity index; counter rates unavailable");
+                            discontinuities.remove(&index);
+                            invalid_discontinuities.insert(index);
+                        }
+                    } else {
+                        problems += 1;
+                        warn!(device = %device.name, %oid, "invalid counter discontinuity value");
+                        let index = oid.0[discontinuity_oid.0.len()];
+                        discontinuities.remove(&index);
+                        invalid_discontinuities.insert(index);
+                    }
+                }
+            }
+            Err(error) => {
+                problems += 1;
+                warn!(device = %device.name, %error, "counter discontinuity walk failed; counter rates unavailable")
+            }
+        }
+        timestamp
+    } else {
+        Utc::now()
+    };
+
+    let resp = PollResponse { values };
+    let parsed = profile.parse(&resp);
+
+    let mut seen = std::collections::HashSet::new();
+    let mut missing_continuity = 0;
+    let mut samples = 0;
+    for v in parsed {
+        let Some(metric_id) = metric_ids.get(v.name).copied() else {
+            problems += 1;
+            warn!(device = %device.name, metric = v.name, "unknown metric; skipping");
+            continue;
+        };
+        let interface_id = match v.interface_index {
+            Some(index) => match state.interface_ids.get(&index) {
+                Some(id) => *id,
+                None => {
+                    problems += 1;
+                    warn!(device = %device.name, if_index = index, metric = v.name, "interface not discovered; skipping sample");
+                    continue;
+                }
+            },
+            None => 0,
+        };
+        if !seen.insert((metric_id, interface_id)) {
+            problems += 1;
+            warn!(device = %device.name, metric = v.name, interface_id, "duplicate metric sample; skipping");
+            continue;
+        }
+        let (value, delta, dt_seconds, counter_reset) = match v.value {
+            MetricReading::Gauge(value) => (value, None, None, false),
+            MetricReading::Counter { value, width } => {
+                let continuity = v
+                    .interface_index
+                    .and_then(|index| discontinuities.get(&index).copied())
+                    .zip(uptime)
+                    .map(|(discontinuity, uptime)| (uptime, discontinuity));
+                if continuity.is_none() {
+                    missing_continuity += 1;
+                }
+                let speed = v.interface_index.and_then(|index| {
+                    state
+                        .interfaces
+                        .iter()
+                        .find(|interface| interface.if_index == index)
+                        .and_then(|interface| interface.speed_bps)
+                });
+                let result = state.counters.observe(
+                    (metric_id, interface_id),
+                    value,
+                    width,
+                    now,
+                    continuity,
+                    speed,
+                );
+                (value as f64, result.delta, result.dt_seconds, result.reset)
+            }
+        };
+        let pushed = state.buffer.push(SampleRow {
+            device_id: device.id,
+            metric_id,
+            interface_id,
+            ts: now,
+            value,
+            delta,
+            dt_seconds,
+            counter_reset,
+            mapping_verified: true,
+        });
+        if pushed == crate::buffer::BufferResult::DroppedOldest {
+            problems += 1;
+            warn!(device = %device.name, "sample buffer full; oldest sample dropped");
+        }
+        samples += 1;
+        let util_name = match v.name {
+            "if_hc_in_octets" => Some("if_in_util_pct"),
+            "if_hc_out_octets" => Some("if_out_util_pct"),
+            _ => None,
+        };
+        if let (Some(name), Some(delta), Some(seconds), Some(index)) =
+            (util_name, delta, dt_seconds, v.interface_index)
+        {
+            let speed = state
+                .interfaces
+                .iter()
+                .find(|item| item.if_index == index)
+                .and_then(|item| item.speed_bps)
+                .filter(|speed| *speed > 0);
+            if let (Some(speed), Some(metric_id)) = (speed, metric_ids.get(name)) {
+                let pushed = state.buffer.push(SampleRow {
+                    device_id: device.id,
+                    metric_id: *metric_id,
+                    interface_id,
+                    ts: now,
+                    value: delta / seconds * 8.0 / speed as f64 * 100.0,
+                    delta: None,
+                    dt_seconds: None,
+                    counter_reset: false,
+                    mapping_verified: true,
+                });
+                if pushed == crate::buffer::BufferResult::DroppedOldest {
+                    problems += 1;
+                    warn!(device = %device.name, "sample buffer full; oldest sample dropped");
+                }
+                samples += 1;
+            }
+        }
+    }
+    if missing_continuity > 0 {
+        problems += 1;
+        warn!(device = %device.name, count = missing_continuity, "counter samples have no continuity metadata; rates unavailable");
+    }
+    Ok(PollOutcome {
+        samples,
+        problems,
+        snmp_probe,
+    })
+}
+
+pub async fn run(
+    pool: PgPool,
+    device: Device,
+    profile: Arc<dyn Profile>,
+    client: Arc<dyn SnmpClient>,
+    metric_ids: Arc<HashMap<String, i32>>,
+    mut shutdown: watch::Receiver<bool>,
+) -> Result<()> {
+    let interval = Duration::from_secs(device.poll_interval_secs.max(1));
+    let mut state = PollState {
+        interfaces: Vec::new(),
+        interface_ids: HashMap::new(),
+        counters: CounterTracker::default(),
+        buffer: Buffer::new(10_000, 500, Duration::from_secs(5)),
+    };
+    let mut next_poll_at = tokio::time::Instant::now();
+    let mut next_discovery_at = next_poll_at;
+    let mut next_hardware_at = next_poll_at;
+    let mut ticker = tokio::time::interval(Duration::from_secs(1));
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+    info!(device = %device.name, profile = profile.name(), "device task started");
+
+    loop {
+        tokio::select! {
+            _ = shutdown.changed() => {
+                info!(device = %device.name, "device task shutting down; flushing buffer");
+                let mut conn = pool.acquire().await?;
+                match state.buffer.flush_on_shutdown(&mut conn).await {
+                    Ok(n) if n > 0 => info!(device = %device.name, flushed = n, "shutdown flush"),
+                    Ok(_) => {}
+                    Err(e) => warn!(device = %device.name, error = %e, "shutdown flush failed"),
+                }
+                return Ok(());
+            }
+            _ = ticker.tick() => {
+                if next_poll_at <= tokio::time::Instant::now() {
+                    let enabled: Option<bool> = sqlx::query_scalar("SELECT enabled FROM devices WHERE id = $1")
+                        .bind(device.id).fetch_optional(&pool).await?;
+                    if enabled != Some(true) {
+                        info!(device = %device.name, "device disabled or removed; stopping polling");
+                        let mut conn = pool.acquire().await?;
+                        if let Err(e) = state.buffer.flush_on_shutdown(&mut conn).await {
+                            warn!(device = %device.name, error = %e, "final flush failed");
+                        }
+                        return Ok(());
+                    }
+                    if next_discovery_at <= tokio::time::Instant::now() {
+                        let discovered = async {
+                            let snapshot = crate::interfaces::discover(client.as_ref()).await?;
+                            let ids = netwatch_db::interfaces::reconcile(&pool, device.id, &snapshot).await?;
+                            Ok::<_, anyhow::Error>((snapshot, ids))
+                        }.await;
+                        match discovered {
+                            Ok((snapshot, ids)) => {
+                                state.counters.retain_interfaces(&ids.values().copied().collect());
+                                state.interfaces = snapshot;
+                                state.interface_ids = ids;
+                                next_discovery_at = tokio::time::Instant::now() + Duration::from_secs(300);
+                            }
+                            Err(e) => {
+                                warn!(device = %device.name, error = %e, "interface discovery failed; retaining previous snapshot");
+                                next_discovery_at = tokio::time::Instant::now() + Duration::from_secs(30);
+                            }
+                        }
+
+                    }
+
+                    let started = tokio::time::Instant::now();
+                    let result = poll_once(&device, profile.as_ref(), &client, &metric_ids, &mut state).await;
+                    let duration = i32::try_from(started.elapsed().as_millis()).unwrap_or(i32::MAX);
+                    if let Ok(PollOutcome { snmp_probe: Some((status, latency, detail)), .. }) = &result {
+                        if let Err(e) = netwatch_db::probes::record(&pool, device.id, "snmp", status, *latency, *detail).await {
+                            warn!(device = %device.name, error = %e, "failed to record SNMP probe");
+                        }
+                    }
+                    let (status, error) = match result {
+                        Ok(PollOutcome { samples: 0, problems, .. }) => ("error", Some(format!("No samples collected; {problems} polling problem(s)"))),
+                        Ok(PollOutcome { problems: 0, .. }) => ("ok", None),
+                        Ok(PollOutcome { problems, .. }) => ("partial", Some(format!("{problems} polling problem(s); see poller logs"))),
+                        Err(e) => {
+                            warn!(device = %device.name, error = %e, "poll failed");
+                            ("error", Some("Polling failed; see poller logs".to_string()))
+                        }
+                    };
+                    if let Err(e) = netwatch_db::devices::record_poll_status(&pool, device.id, status, Some(duration), error.as_deref()).await {
+                        warn!(device = %device.name, error = %e, "failed to record poll status");
+                    }
+                    if next_hardware_at <= tokio::time::Instant::now() {
+                        if let Err(e) = crate::hardware::collect(&pool, device.id, client.as_ref()).await {
+                            warn!(device = %device.name, error = %e, "hardware health collection failed");
+                        }
+                        next_hardware_at = tokio::time::Instant::now() + Duration::from_secs(300);
+                    }
+                    // Overrun rule: schedule the next poll from *now*, not from
+                    // the previous scheduled time.
+                    next_poll_at = tokio::time::Instant::now() + interval;
+                }
+
+                if state.buffer.should_flush() {
+                    let mut conn = match pool.acquire().await {
+                        Ok(c) => c,
+                        Err(e) => { warn!(device = %device.name, error = %e, "acquire failed"); continue; }
+                    };
+                    match state.buffer.flush(&mut conn).await {
+                        Ok(n) => info!(device = %device.name, flushed = n, "flushed"),
+                        Err(e) => warn!(device = %device.name, error = %e, "flush failed; will retry"),
+                    }
+                }
+            }
+        }
+    }
+}

@@ -1,0 +1,25 @@
+[package]
+name = "netwatch-api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+netwatch-core = { path = "../core" }
+netwatch-crypto = { path = "../crypto" }
+netwatch-db = { path = "../db" }
+anyhow = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = "1"
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+axum = "0.7"
+sqlx = { workspace = true }
+chrono = { workspace = true }
+ring = "0.17"
+hex = "0.4"
+tower-http = { version = "0.5", features = ["fs", "set-header"] }
+zeroize = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }

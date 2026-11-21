@@ -1,0 +1,16 @@
+[package]
+name = "netwatch-snmp"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+netwatch-core = { path = "../core" }
+async-snmp = "0.5"
+async-trait = "0.1"
+tokio = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+futures = "0.3"
+
+[dev-dependencies]
+tokio = { workspace = true }

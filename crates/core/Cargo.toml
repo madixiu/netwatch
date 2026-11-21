@@ -1,0 +1,10 @@
+[package]
+name = "netwatch-core"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+chrono = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+zeroize = { version = "1", features = ["derive"] }

@@ -1,0 +1,14 @@
+[package]
+name = "netwatch-db"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+netwatch-core = { path = "../core" }
+netwatch-crypto = { path = "../crypto" }
+sqlx = { workspace = true }
+chrono = { workspace = true }
+thiserror = { workspace = true }
+zeroize = { version = "1", features = ["derive"] }
+serde = { workspace = true }
+tokio = { workspace = true }

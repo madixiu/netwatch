@@ -1,0 +1,25 @@
+[package]
+name = "netwatch-poller"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "netwatch-poller"
+path = "src/main.rs"
+
+[dependencies]
+netwatch-core = { path = "../core" }
+netwatch-crypto = { path = "../crypto" }
+netwatch-db = { path = "../db" }
+netwatch-profiles = { path = "../profiles" }
+netwatch-snmp = { path = "../snmp" }
+tokio = { workspace = true }
+sqlx = { workspace = true }
+chrono = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+async-trait = "0.1"

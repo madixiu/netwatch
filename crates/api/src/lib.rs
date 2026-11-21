@@ -1,0 +1,137 @@
+mod auth;
+mod monitoring;
+mod scans;
+#[cfg(test)]
+mod tests;
+
+use std::{path::PathBuf, sync::Arc};
+
+use axum::{
+    extract::{DefaultBodyLimit, Extension, State},
+    http::{header, HeaderValue, StatusCode},
+    middleware,
+    response::{IntoResponse, Response},
+    routing::{get, post},
+    Json, Router,
+};
+use netwatch_core::scan::Cidr4;
+use netwatch_crypto::SecretKey;
+use serde_json::json;
+use sqlx::PgPool;
+use tower_http::{services::ServeDir, set_header::SetResponseHeaderLayer};
+
+#[derive(Clone)]
+pub struct AppState {
+    pool: PgPool,
+    key: SecretKey,
+    scan_allow: Vec<Cidr4>,
+    login_limiter: Arc<auth::LoginLimiter>,
+    dummy_hash: String,
+}
+
+impl AppState {
+    pub async fn new(pool: PgPool, key: SecretKey, scan_allow: Vec<Cidr4>) -> anyhow::Result<Self> {
+        let dummy_hash =
+            tokio::task::spawn_blocking(|| netwatch_crypto::password::hash(b"invalid-login"))
+                .await??;
+        Ok(Self {
+            pool,
+            key,
+            scan_allow,
+            login_limiter: Arc::new(auth::LoginLimiter::new()),
+            dummy_hash,
+        })
+    }
+}
+
+pub fn router(state: AppState, web_root: PathBuf) -> Router {
+    let protected = Router::new()
+        .route("/api/session", get(session))
+        .route("/api/logout", post(auth::logout))
+        .route("/api/devices", get(monitoring::list_devices))
+        .route("/api/devices/:id", get(monitoring::device_detail))
+        .route("/api/metrics/traffic", get(monitoring::traffic))
+        .route("/api/metrics/interface-health", get(monitoring::interface_health))
+        .route("/api/metrics/resources", get(monitoring::resources))
+        .route("/api/status", get(monitoring::status))
+        .route(
+            "/api/credential-profiles",
+            get(scans::list_profiles).post(scans::create_profile),
+        )
+        .route(
+            "/api/scans",
+            get(scans::list_scans).post(scans::create_scan),
+        )
+        .route("/api/scans/:id", get(scans::get_scan))
+        .route("/api/scans/:id/results", get(scans::list_results))
+        .route("/api/scans/:id/cancel", post(scans::cancel))
+        .route("/api/scan-results/:id/approve", post(scans::approve))
+        .route("/api/scan-results/:id/reject", post(scans::reject))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            auth::authenticate,
+        ));
+
+    Router::new()
+        .route("/healthz", get(health))
+        .route("/api/login", post(auth::login))
+        .merge(protected)
+        .fallback_service(ServeDir::new(web_root).append_index_html_on_directories(true))
+        .layer(DefaultBodyLimit::max(16 * 1024))
+        .layer(SetResponseHeaderLayer::if_not_present(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static("no-store"),
+        ))
+        .layer(SetResponseHeaderLayer::if_not_present(
+            header::X_CONTENT_TYPE_OPTIONS,
+            HeaderValue::from_static("nosniff"),
+        ))
+        .layer(SetResponseHeaderLayer::if_not_present(
+            header::CONTENT_SECURITY_POLICY,
+            HeaderValue::from_static(
+                "default-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
+            ),
+        ))
+        .with_state(state)
+}
+
+async fn session(Extension(user): Extension<auth::User>) -> Json<auth::User> {
+    Json(user)
+}
+
+async fn health(State(state): State<AppState>) -> Result<StatusCode, ApiError> {
+    sqlx::query("SELECT 1").execute(&state.pool).await?;
+    Ok(StatusCode::OK)
+}
+
+#[derive(Debug)]
+struct ApiError {
+    status: StatusCode,
+    message: String,
+}
+
+impl ApiError {
+    fn new(status: StatusCode, message: impl Into<String>) -> Self {
+        Self {
+            status,
+            message: message.into(),
+        }
+    }
+
+    fn internal(error: impl std::fmt::Display) -> Self {
+        tracing::error!(error = %error, "API operation failed");
+        Self::new(StatusCode::INTERNAL_SERVER_ERROR, "internal server error")
+    }
+}
+
+impl From<sqlx::Error> for ApiError {
+    fn from(error: sqlx::Error) -> Self {
+        Self::internal(error)
+    }
+}
+
+impl IntoResponse for ApiError {
+    fn into_response(self) -> Response {
+        (self.status, Json(json!({ "error": self.message }))).into_response()
+    }
+}

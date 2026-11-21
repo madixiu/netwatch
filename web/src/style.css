@@ -1,0 +1,91 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  --color-slate-950: #080e0c;
+  --color-slate-900: #0c1511;
+  --color-slate-800: #1b3025;
+  --color-slate-700: #31503c;
+  --color-slate-500: #829c89;
+  --color-slate-400: #a4b9aa;
+  --color-slate-300: #c1d3c4;
+  --color-slate-200: #d7e7d9;
+  --color-slate-100: #edf7ec;
+  --color-teal-950: #102818;
+  --color-teal-900: #214e2c;
+  --color-teal-800: #326d3e;
+  --color-teal-400: #9afc74;
+  --color-teal-300: #b7ff99;
+  --color-teal-200: #d4ffc4;
+}
+
+@layer base {
+  html { color-scheme: dark; }
+  body {
+    @apply m-0 bg-slate-950 text-slate-100 antialiased;
+    background-image:
+      radial-gradient(ellipse at 50% -20%, rgb(62 125 64 / 12%), transparent 55%),
+      linear-gradient(rgb(154 252 116 / 2%) 1px, transparent 1px),
+      linear-gradient(90deg, rgb(154 252 116 / 2%) 1px, transparent 1px);
+    background-size: auto, 40px 40px, 40px 40px;
+  }
+  button { @apply cursor-pointer disabled:cursor-not-allowed disabled:opacity-40; }
+  button:focus-visible { @apply outline-2 outline-offset-2 outline-teal-400; }
+  input, select {
+    @apply w-full rounded-sm border border-slate-700 bg-slate-950 px-3 py-3 text-sm text-slate-100 outline-none focus:border-teal-400 focus:ring-2 focus:ring-teal-400/20;
+  }
+  input::placeholder { color: #78917e; }
+  label { @apply block text-sm font-medium text-slate-300; }
+}
+
+@layer components {
+  .card {
+    @apply rounded-sm border border-slate-800 bg-slate-900 p-5 sm:p-6;
+    box-shadow: 0 16px 40px rgb(0 0 0 / 18%), inset 0 1px rgb(154 252 116 / 5%);
+  }
+  .button-primary {
+    @apply inline-flex items-center justify-center rounded-sm bg-teal-400 px-4 py-3 text-sm font-bold text-slate-950 transition hover:bg-teal-300;
+    box-shadow: 0 0 20px rgb(154 252 116 / 10%);
+  }
+  .button-secondary { @apply inline-flex items-center justify-center rounded-sm border border-slate-700 px-4 py-2.5 text-sm font-semibold text-slate-200 transition hover:border-teal-400 hover:bg-slate-800; }
+  .button-text { @apply text-sm font-semibold text-teal-300 hover:text-teal-200; }
+  .eyebrow { @apply text-xs font-bold uppercase tracking-[0.14em] text-teal-400; }
+  .console-header { @apply border-b border-slate-800 bg-slate-950/90; }
+  .brand-mark {
+    @apply grid h-11 w-11 place-items-center border border-teal-400 text-lg font-bold text-teal-400;
+    grid-template-columns: auto auto;
+    align-content: center;
+    justify-content: center;
+    box-shadow: inset 0 0 16px rgb(154 252 116 / 8%);
+  }
+  .brand-mark span { @apply text-slate-400; }
+  .brand-name { @apply text-sm font-bold tracking-[0.12em] text-slate-100; }
+  .brand-name span { @apply text-teal-400; }
+  .brand-subtitle { @apply mt-1 text-[10px] tracking-[0.08em] text-slate-400; }
+  .cursor-mark { @apply ml-1 text-teal-400; }
+  .console-tag { @apply border border-teal-900 bg-teal-950/50 px-3 py-2 text-xs font-medium text-teal-300; }
+  .console-tag span { @apply mr-2 text-teal-400; }
+  .panel-icon { @apply text-sm font-bold tracking-wider text-teal-400; }
+  .console-summary { @apply grid grid-cols-3 border border-slate-800 bg-slate-900; }
+  .console-summary div { @apply flex flex-col gap-2 px-3 py-4 sm:px-5; }
+  .console-summary div + div { @apply border-l border-slate-800; }
+  .console-summary span { @apply text-[10px] uppercase leading-4 tracking-wider text-slate-400 sm:text-xs; }
+  .console-summary strong { @apply text-xl font-semibold text-teal-400 sm:text-2xl; }
+  .nav-link { @apply border border-transparent px-3 py-2 text-xs font-semibold uppercase tracking-wider text-slate-400 hover:text-teal-300; }
+  .nav-active { @apply border-slate-700 bg-slate-900 text-teal-400; }
+  .device-select { @apply flex w-full items-center justify-between gap-3 border border-slate-800 bg-slate-950 px-3 py-3 text-left hover:border-slate-700; }
+  .device-select-active { @apply border-teal-800 bg-teal-950/50; }
+  .device-select strong { @apply block break-all text-sm text-slate-100; }
+  .device-select small { @apply mt-1 block text-xs text-slate-400; }
+  .status-tag { @apply shrink-0 border border-slate-700 px-2 py-1 text-[10px] uppercase tracking-wider text-slate-300; }
+  .status-ok { @apply border-teal-800 text-teal-300; }
+  .status-error { @apply border-rose-800 text-rose-300; }
+  .status-partial, .status-stale { @apply border-amber-800 text-amber-300; }
+  .chart-panel { @apply border border-slate-800 bg-slate-950 p-4; }
+  .chart-empty { @apply border border-dashed border-slate-700 px-4 py-10 text-center text-sm text-slate-400; }
+}
+
+progress { appearance: none; overflow: hidden; border-radius: 0; }
+progress::-webkit-progress-bar { background-color: #1b3025; }
+progress::-webkit-progress-value { background-color: #9afc74; }
+progress::-moz-progress-bar { background-color: #9afc74; }

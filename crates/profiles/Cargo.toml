@@ -1,0 +1,7 @@
+[package]
+name = "netwatch-profiles"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+netwatch-core = { path = "../core" }

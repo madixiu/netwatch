@@ -1,0 +1,2 @@
+ALTER TABLE interfaces
+    ADD COLUMN first_seen TIMESTAMPTZ NOT NULL DEFAULT now();
