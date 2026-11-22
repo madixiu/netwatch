@@ -1,0 +1,19 @@
+[Unit]
+Description=NetWatch poller
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=netwatch
+Group=netwatch
+EnvironmentFile=/etc/netwatch/netwatch.env
+ExecStart=/opt/netwatch/bin/netwatch-poller
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+NoNewPrivileges=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

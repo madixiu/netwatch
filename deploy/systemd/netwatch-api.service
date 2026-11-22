@@ -1,0 +1,18 @@
+[Unit]
+Description=NetWatch API and dashboard
+After=network-online.target postgresql.service netwatch-poller.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=netwatch
+Group=netwatch
+EnvironmentFile=/etc/netwatch/netwatch.env
+ExecStart=/opt/netwatch/bin/netwatch-api
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

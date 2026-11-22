@@ -1175,6 +1175,7 @@ dependencies = [
  "async-trait",
  "futures",
  "netwatch-core",
+ "netwatch-profiles",
  "thiserror 1.0.69",
  "tokio",
  "tracing",

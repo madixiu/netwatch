@@ -1,0 +1,11 @@
+services:
+  snmpsim:
+    image: tandrup/snmpsim
+    command: >
+      snmpsim-command-responder
+      --data-dir=/snmpsim
+      --agent-udpv4-endpoint=0.0.0.0:1161
+    ports:
+      - "1161:1161/udp"
+    volumes:
+      - ./:/snmpsim:ro
