@@ -87,6 +87,8 @@ pub async fn series(
         SeriesKind::Resources => vec!["cpu_5min_pct", "cpu_load_pct", "memory_used_pct"],
         SeriesKind::InterfaceHealth => vec![
             "if_oper_status",
+            "if_vlan",
+            "if_trunk",
             "if_in_util_pct",
             "if_out_util_pct",
             "if_in_discards",

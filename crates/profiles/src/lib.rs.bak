@@ -1,0 +1,344 @@
+//! Vendor / OS profile boundary.
+//!
+//! The poller *never* branches on vendor. It calls `Profile::request` and
+//! `Profile::parse` and writes whatever comes back. Adding a vendor = adding
+//! a module here that impls `Profile` and registering it in `registry()`.
+
+use netwatch_core::{oid::Oid, snmp_value::SnmpValue};
+use std::sync::Arc;
+
+pub use netwatch_core::model::{MetricDef, MetricKind, MetricReading, MetricValue};
+
+pub struct DeviceContext<'a> {
+    pub sys_object_id: &'a str,
+    pub sys_descr: &'a str,
+}
+
+/// What to ask this round. `gets` are single-object reads (scalars, ending
+/// in `.0`); `walks` are whole-column reads. The poller runs both.
+#[derive(Debug, Clone, Default)]
+pub struct PollRequest {
+    pub gets: Vec<Oid>,
+    pub walks: Vec<Oid>,
+    /// Optional column groups; an empty or failed column stops its group.
+    pub optional_walk_groups: Vec<Vec<Oid>>,
+}
+
+/// Everything the device said, keyed by the OID it answered with.
+#[derive(Debug, Clone, Default)]
+pub struct PollResponse {
+    pub values: Vec<(Oid, SnmpValue)>,
+}
+
+impl PollResponse {
+    pub fn get(&self, oid: &Oid) -> Option<&SnmpValue> {
+        self.values.iter().find(|(o, _)| o == oid).map(|(_, v)| v)
+    }
+
+    pub fn walk<'a>(
+        &'a self,
+        root: &'a Oid,
+    ) -> impl Iterator<Item = (&'a Oid, &'a SnmpValue)> + 'a {
+        self.values
+            .iter()
+            .filter(move |(o, _)| root.is_prefix_of(o))
+            .map(|(o, v)| (o, v))
+    }
+
+    /// ifIndex from a table row's OID. Assumes the last sub-id is the index.
+    /// Wrong for tables with composite indexes; the profile must not use it
+    /// for those.
+    pub fn if_index_of(oid: &Oid) -> Option<u32> {
+        oid.last()
+    }
+}
+
+/// One MAC address learned on a switch port (ifIndex of the port).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MacSighting {
+    pub mac: String,
+    pub if_index: u32,
+}
+
+pub trait Profile: Send + Sync {
+    fn name(&self) -> &'static str;
+    fn detect(&self, ctx: &DeviceContext<'_>) -> bool;
+    fn metrics(&self) -> &'static [MetricDef];
+    fn request(&self, interfaces: &[netwatch_core::model::InterfaceRef]) -> PollRequest;
+    fn parse(&self, resp: &PollResponse) -> Vec<MetricValue>;
+    /// Bridge forwarding table, if the profile supports it. Default: none.
+    fn parse_macs(&self, _resp: &PollResponse) -> Vec<MacSighting> {
+        Vec::new()
+    }
+}
+
+pub fn registry() -> Vec<Arc<dyn Profile>> {
+    vec![
+        Arc::new(cisco_ios::CiscoIos),
+        Arc::new(cisco_nxos::CiscoNxos),
+        Arc::new(mikrotik::MikroTik),
+    ]
+}
+
+pub fn detect(ctx: &DeviceContext<'_>) -> Option<Arc<dyn Profile>> {
+    registry().into_iter().find(|p| p.detect(ctx))
+}
+
+pub mod cisco_ios;
+pub mod cisco_nxos;
+pub mod mikrotik;
+
+const OID_IF_HC_IN: &str = "1.3.6.1.2.1.31.1.1.1.6";
+const OID_IF_HC_OUT: &str = "1.3.6.1.2.1.31.1.1.1.10";
+
+const INTERFACE_COLUMNS: &[(&str, &str, bool)] = &[
+    ("1.3.6.1.2.1.2.2.1.8", "if_oper_status", false),
+    ("1.3.6.1.2.1.2.2.1.13", "if_in_discards", true),
+    ("1.3.6.1.2.1.2.2.1.14", "if_in_errors", true),
+    ("1.3.6.1.2.1.2.2.1.19", "if_out_discards", true),
+    ("1.3.6.1.2.1.2.2.1.20", "if_out_errors", true),
+    ("1.3.6.1.2.1.31.1.1.1.7", "if_hc_in_ucast_pkts", true),
+    ("1.3.6.1.2.1.31.1.1.1.8", "if_hc_in_multicast_pkts", true),
+    ("1.3.6.1.2.1.31.1.1.1.9", "if_hc_in_broadcast_pkts", true),
+    ("1.3.6.1.2.1.31.1.1.1.11", "if_hc_out_ucast_pkts", true),
+    ("1.3.6.1.2.1.31.1.1.1.12", "if_hc_out_multicast_pkts", true),
+    ("1.3.6.1.2.1.31.1.1.1.13", "if_hc_out_broadcast_pkts", true),
+];
+
+pub(crate) const COMMON_METRICS: &[MetricDef] = &[
+    MetricDef {
+        name: "if_vlan",
+        unit: "vlan",
+        kind: MetricKind::Gauge,
+    },
+    MetricDef {
+        name: "ip_forwarding",
+        unit: "flag",
+        kind: MetricKind::Gauge,
+    },
+    MetricDef {
+        name: "if_hc_in_octets",
+        unit: "bytes",
+        kind: MetricKind::Counter,
+    },
+    MetricDef {
+        name: "if_hc_out_octets",
+        unit: "bytes",
+        kind: MetricKind::Counter,
+    },
+    MetricDef {
+        name: "cpu_5min_pct",
+        unit: "%",
+        kind: MetricKind::Gauge,
+    },
+    MetricDef {
+        name: "cpu_load_pct",
+        unit: "%",
+        kind: MetricKind::Gauge,
+    },
+    MetricDef {
+        name: "memory_used_pct",
+        unit: "%",
+        kind: MetricKind::Gauge,
+    },
+    MetricDef {
+        name: "if_oper_status",
+        unit: "state",
+        kind: MetricKind::Gauge,
+    },
+    MetricDef {
+        name: "if_in_util_pct",
+        unit: "%",
+        kind: MetricKind::Gauge,
+    },
+    MetricDef {
+        name: "if_out_util_pct",
+        unit: "%",
+        kind: MetricKind::Gauge,
+    },
+    MetricDef {
+        name: "if_in_discards",
+        unit: "packets",
+        kind: MetricKind::Counter,
+    },
+    MetricDef {
+        name: "if_out_discards",
+        unit: "packets",
+        kind: MetricKind::Counter,
+    },
+    MetricDef {
+        name: "if_in_errors",
+        unit: "packets",
+        kind: MetricKind::Counter,
+    },
+    MetricDef {
+        name: "if_out_errors",
+        unit: "packets",
+        kind: MetricKind::Counter,
+    },
+    MetricDef {
+        name: "if_hc_in_ucast_pkts",
+        unit: "packets",
+        kind: MetricKind::Counter,
+    },
+    MetricDef {
+        name: "if_hc_in_multicast_pkts",
+        unit: "packets",
+        kind: MetricKind::Counter,
+    },
+    MetricDef {
+        name: "if_hc_in_broadcast_pkts",
+        unit: "packets",
+        kind: MetricKind::Counter,
+    },
+    MetricDef {
+        name: "if_hc_out_ucast_pkts",
+        unit: "packets",
+        kind: MetricKind::Counter,
+    },
+    MetricDef {
+        name: "if_hc_out_multicast_pkts",
+        unit: "packets",
+        kind: MetricKind::Counter,
+    },
+    MetricDef {
+        name: "if_hc_out_broadcast_pkts",
+        unit: "packets",
+        kind: MetricKind::Counter,
+    },
+];
+
+/// ifHCIn/OutOctets column walks plus any profile-specific walks.
+pub(crate) fn traffic_request(extra_walks: &[&str]) -> PollRequest {
+    let mut walks = vec![
+        Oid::parse(OID_IF_HC_IN).unwrap(),
+        Oid::parse(OID_IF_HC_OUT).unwrap(),
+    ];
+    walks.extend(extra_walks.iter().map(|s| Oid::parse(s).unwrap()));
+    PollRequest {
+        gets: vec![],
+        walks,
+        optional_walk_groups: std::iter::once(
+            [
+                "1.3.6.1.2.1.25.2.3.1.2",
+                "1.3.6.1.2.1.25.2.3.1.5",
+                "1.3.6.1.2.1.25.2.3.1.6",
+            ]
+            .into_iter()
+            .map(|s| Oid::parse(s).unwrap())
+            .collect(),
+        )
+        .chain(
+            INTERFACE_COLUMNS
+                .iter()
+                .map(|(oid, _, _)| vec![Oid::parse(oid).unwrap()]),
+        )
+        .collect(),
+    }
+}
+
+/// RAM percentage from a single HOST-RESOURCES-MIB RAM storage row.
+pub(crate) fn memory_used_pct(resp: &PollResponse) -> Option<MetricValue> {
+    let types = Oid::parse("1.3.6.1.2.1.25.2.3.1.2").unwrap();
+    let sizes = Oid::parse("1.3.6.1.2.1.25.2.3.1.5").unwrap();
+    let used = Oid::parse("1.3.6.1.2.1.25.2.3.1.6").unwrap();
+    let ram_type = Oid::parse("1.3.6.1.2.1.25.2.1.2").unwrap();
+    let rows: Vec<_> = resp
+        .walk(&types)
+        .filter(|(oid, value)| {
+            oid.0.len() == types.0.len() + 1
+                && matches!(value, SnmpValue::ObjectIdentifier(kind) if *kind == ram_type)
+        })
+        .collect();
+    if rows.len() != 1 {
+        return None;
+    }
+    let index = rows[0].0.last()?;
+    let unique = |oid: &Oid| {
+        let mut values = resp.values.iter().filter(|(candidate, _)| candidate == oid);
+        let first = values.next()?;
+        if values.next().is_some() {
+            None
+        } else {
+            first.1.as_u64()
+        }
+    };
+    let size = unique(&sizes.child(index))?;
+    let consumed = unique(&used.child(index))?;
+    if size == 0 || consumed > size {
+        return None;
+    }
+    Some(MetricValue {
+        name: "memory_used_pct",
+        interface_index: None,
+        value: MetricReading::Gauge(consumed as f64 * 100.0 / size as f64),
+    })
+}
+/// Per-interface traffic counters keyed by ifIndex.
+pub(crate) fn traffic_metrics(resp: &PollResponse) -> Vec<MetricValue> {
+    let mut out = Vec::new();
+    for (root, name) in [
+        (OID_IF_HC_IN, "if_hc_in_octets"),
+        (OID_IF_HC_OUT, "if_hc_out_octets"),
+    ] {
+        let root = Oid::parse(root).unwrap();
+        for (oid, value) in resp.walk(&root) {
+            if oid.0.len() != root.0.len() + 1 {
+                continue;
+            }
+            let (SnmpValue::Counter64(v), Some(if_index)) = (value, PollResponse::if_index_of(oid))
+            else {
+                continue;
+            };
+            out.push(MetricValue {
+                name,
+                interface_index: Some(if_index),
+                value: MetricReading::Counter {
+                    value: *v,
+                    width: netwatch_core::counter::CounterWidth::Bits64,
+                },
+            });
+        }
+    }
+    for (column, name, counter) in INTERFACE_COLUMNS {
+        let root = Oid::parse(column).unwrap();
+        for (oid, value) in resp.walk(&root) {
+            if oid.0.len() != root.0.len() + 1 {
+                continue;
+            }
+            let Some(if_index) = oid.last() else { continue };
+            let reading = if *counter {
+                match (value.as_u64(), value.counter_width()) {
+                    (Some(value), Some(width)) => MetricReading::Counter { value, width },
+                    _ => continue,
+                }
+            } else {
+                match value.as_u64() {
+                    Some(status @ 1..=7) => MetricReading::Gauge(status as f64),
+                    _ => continue,
+                }
+            };
+            out.push(MetricValue {
+                name,
+                interface_index: Some(if_index),
+                value: reading,
+            });
+        }
+    }
+    out
+}
+
+/// First row of a gauge table, for devices whose "overall" CPU row is index 1.
+pub(crate) fn first_row_gauge(
+    resp: &PollResponse,
+    root: &str,
+    name: &'static str,
+) -> Option<MetricValue> {
+    let root = Oid::parse(root).unwrap();
+    let (_, v) = resp.walk(&root).next()?;
+    Some(MetricValue {
+        name,
+        interface_index: None,
+        value: MetricReading::Gauge(v.as_u64()? as f64),
+    })
+}

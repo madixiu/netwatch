@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import Monitoring from "./Monitoring";
+import Overview from "./Overview";
 
 const TOKEN_KEY = "netwatch.session";
 const running = (status) => status === "queued" || status === "running";
@@ -304,6 +305,13 @@ function ConsoleHeader({ user, onLogout, page, setPage }) {
             onClick={() => setPage("monitor")}
           >
             Monitor
+          </button>
+          <button
+            className={`nav-link ${page === "overview" ? "nav-active" : ""}`}
+            aria-current={page === "overview" ? "page" : undefined}
+            onClick={() => setPage("overview")}
+          >
+            Overview
           </button>
           <button
             className={`nav-link ${page === "scan" ? "nav-active" : ""}`}
@@ -895,6 +903,18 @@ export default function App() {
         page={page}
         setPage={setPage}
       />
+    );
+  if (page === "overview")
+    return (
+      <div className="min-h-screen">
+        <ConsoleHeader
+          user={user}
+          onLogout={logout}
+          page={page}
+          setPage={setPage}
+        />
+        <Overview token={token} onExpired={expire} request={request} />
+      </div>
     );
   return (
     <div className="min-h-screen">

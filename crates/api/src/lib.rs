@@ -3,9 +3,9 @@ mod monitoring;
 mod scans;
 #[cfg(test)]
 mod tests;
-
+ 
 use std::{path::PathBuf, sync::Arc};
-
+ 
 use axum::{
     extract::{DefaultBodyLimit, Extension, State},
     http::{header, HeaderValue, StatusCode},
@@ -19,7 +19,7 @@ use netwatch_crypto::SecretKey;
 use serde_json::json;
 use sqlx::PgPool;
 use tower_http::{services::ServeDir, set_header::SetResponseHeaderLayer};
-
+ 
 #[derive(Clone)]
 pub struct AppState {
     pool: PgPool,
@@ -28,7 +28,7 @@ pub struct AppState {
     login_limiter: Arc<auth::LoginLimiter>,
     dummy_hash: String,
 }
-
+ 
 impl AppState {
     pub async fn new(pool: PgPool, key: SecretKey, scan_allow: Vec<Cidr4>) -> anyhow::Result<Self> {
         let dummy_hash =
@@ -43,7 +43,7 @@ impl AppState {
         })
     }
 }
-
+ 
 pub fn router(state: AppState, web_root: PathBuf) -> Router {
     let protected = Router::new()
         .route("/api/session", get(session))
@@ -54,6 +54,8 @@ pub fn router(state: AppState, web_root: PathBuf) -> Router {
         .route("/api/metrics/interface-health", get(monitoring::interface_health))
         .route("/api/metrics/resources", get(monitoring::resources))
         .route("/api/status", get(monitoring::status))
+        .route("/api/overview", get(monitoring::overview))
+        .route("/api/macs", get(monitoring::interface_macs))
         .route(
             "/api/credential-profiles",
             get(scans::list_profiles).post(scans::create_profile),
@@ -71,7 +73,7 @@ pub fn router(state: AppState, web_root: PathBuf) -> Router {
             state.clone(),
             auth::authenticate,
         ));
-
+ 
     Router::new()
         .route("/healthz", get(health))
         .route("/api/login", post(auth::login))
@@ -94,22 +96,22 @@ pub fn router(state: AppState, web_root: PathBuf) -> Router {
         ))
         .with_state(state)
 }
-
+ 
 async fn session(Extension(user): Extension<auth::User>) -> Json<auth::User> {
     Json(user)
 }
-
+ 
 async fn health(State(state): State<AppState>) -> Result<StatusCode, ApiError> {
     sqlx::query("SELECT 1").execute(&state.pool).await?;
     Ok(StatusCode::OK)
 }
-
+ 
 #[derive(Debug)]
 struct ApiError {
     status: StatusCode,
     message: String,
 }
-
+ 
 impl ApiError {
     fn new(status: StatusCode, message: impl Into<String>) -> Self {
         Self {
@@ -117,21 +119,22 @@ impl ApiError {
             message: message.into(),
         }
     }
-
+ 
     fn internal(error: impl std::fmt::Display) -> Self {
         tracing::error!(error = %error, "API operation failed");
         Self::new(StatusCode::INTERNAL_SERVER_ERROR, "internal server error")
     }
 }
-
+ 
 impl From<sqlx::Error> for ApiError {
     fn from(error: sqlx::Error) -> Self {
         Self::internal(error)
     }
 }
-
+ 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         (self.status, Json(json!({ "error": self.message }))).into_response()
     }
 }
+ 

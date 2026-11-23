@@ -53,12 +53,23 @@ impl PollResponse {
     }
 }
 
+/// One MAC address learned on a switch port (ifIndex of the port).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MacSighting {
+    pub mac: String,
+    pub if_index: u32,
+}
+
 pub trait Profile: Send + Sync {
     fn name(&self) -> &'static str;
     fn detect(&self, ctx: &DeviceContext<'_>) -> bool;
     fn metrics(&self) -> &'static [MetricDef];
     fn request(&self, interfaces: &[netwatch_core::model::InterfaceRef]) -> PollRequest;
     fn parse(&self, resp: &PollResponse) -> Vec<MetricValue>;
+    /// Bridge forwarding table, if the profile supports it. Default: none.
+    fn parse_macs(&self, _resp: &PollResponse) -> Vec<MacSighting> {
+        Vec::new()
+    }
 }
 
 pub fn registry() -> Vec<Arc<dyn Profile>> {
@@ -95,6 +106,21 @@ const INTERFACE_COLUMNS: &[(&str, &str, bool)] = &[
 ];
 
 pub(crate) const COMMON_METRICS: &[MetricDef] = &[
+    MetricDef {
+        name: "if_trunk",
+        unit: "state",
+        kind: MetricKind::Gauge,
+    },
+    MetricDef {
+        name: "if_vlan",
+        unit: "vlan",
+        kind: MetricKind::Gauge,
+    },
+    MetricDef {
+        name: "ip_forwarding",
+        unit: "flag",
+        kind: MetricKind::Gauge,
+    },
     MetricDef {
         name: "if_hc_in_octets",
         unit: "bytes",

@@ -10,12 +10,28 @@
 //!
 //! Memory uses a single HOST-RESOURCES-MIB RAM storage row when available.
 
-use netwatch_core::model::{InterfaceRef, MetricValue};
+use std::collections::HashMap;
+
+use netwatch_core::{
+    model::{InterfaceRef, MetricReading, MetricValue},
+    oid::Oid,
+};
 
 use crate::{
-    first_row_gauge, memory_used_pct, traffic_metrics, traffic_request, DeviceContext, MetricDef,
-    PollRequest, PollResponse, Profile, COMMON_METRICS,
+    first_row_gauge, memory_used_pct, traffic_metrics, traffic_request, DeviceContext, MacSighting,
+    MetricDef, PollRequest, PollResponse, Profile, COMMON_METRICS,
 };
+
+/// vmVlan: VLAN number of each port, indexed by ifIndex (Cisco).
+const OID_VM_VLAN: &str = "1.3.6.1.4.1.9.9.68.1.2.2.1.2";
+/// vlanTrunkPortDynamicState: 1 = trunking, 2 = not trunking, indexed by ifIndex.
+const OID_VTP_TRUNK: &str = "1.3.6.1.4.1.9.9.46.1.6.1.1.14";
+/// ipForwarding.0: 1 = router (layer 3), 2 = not forwarding (layer 2).
+const OID_IP_FORWARDING: &str = "1.3.6.1.2.1.4.1.0";
+/// dot1dTpFdbPort: bridge port of each learned MAC, indexed by the 6 MAC octets.
+const OID_FDB_PORT: &str = "1.3.6.1.2.1.17.4.3.1.2";
+/// dot1dBasePortIfIndex: ifIndex of each bridge port.
+const OID_BASE_PORT_IFINDEX: &str = "1.3.6.1.2.1.17.1.4.1.2";
 
 const OID_CPU_5MIN: &str = "1.3.6.1.4.1.9.9.109.1.1.1.1.8";
 
@@ -41,7 +57,13 @@ impl Profile for CiscoIos {
     fn request(&self, _interfaces: &[InterfaceRef]) -> PollRequest {
         // Walk whole columns; the device filters by interface via ifIndex,
         // not by us sending per-ifIndex GETs. One PDU round trip per column.
-        traffic_request(&[OID_CPU_5MIN])
+        let mut req = traffic_request(&[
+            OID_CPU_5MIN,
+            OID_VM_VLAN,
+            OID_VTP_TRUNK,
+        ]);
+        req.gets.push(Oid::parse(OID_IP_FORWARDING).unwrap());
+        req
     }
 
     fn parse(&self, resp: &PollResponse) -> Vec<MetricValue> {
@@ -51,8 +73,93 @@ impl Profile for CiscoIos {
         // this proves wrong on a device, refine the profile.
         out.extend(first_row_gauge(resp, OID_CPU_5MIN, "cpu_5min_pct"));
         out.extend(memory_used_pct(resp));
+        out.extend(vlan_metrics(resp));
+        out.extend(trunk_metrics(resp));
+        if let Some(value) = resp
+            .get(&Oid::parse(OID_IP_FORWARDING).unwrap())
+            .and_then(|v| v.as_u64())
+        {
+            out.push(MetricValue {
+                name: "ip_forwarding",
+                interface_index: None,
+                value: MetricReading::Gauge(value as f64),
+            });
+        }
         out
     }
+
+    fn parse_macs(&self, resp: &PollResponse) -> Vec<MacSighting> {
+        // Default VLAN only. Cisco keeps one forwarding table per VLAN, and
+        // reading the others needs community indexing (not done here).
+        let base_root = Oid::parse(OID_BASE_PORT_IFINDEX).unwrap();
+        let bridge_to_if: HashMap<u32, u32> = resp
+            .walk(&base_root)
+            .filter_map(|(oid, value)| {
+                if oid.0.len() != base_root.0.len() + 1 {
+                    return None;
+                }
+                Some((oid.last()?, value.as_u64()? as u32))
+            })
+            .collect();
+
+        let port_root = Oid::parse(OID_FDB_PORT).unwrap();
+        resp.walk(&port_root)
+            .filter_map(|(oid, value)| {
+                let len = oid.0.len();
+                if len != port_root.0.len() + 6 {
+                    return None;
+                }
+                let mut octets = Vec::with_capacity(6);
+                for sub in &oid.0[len - 6..] {
+                    octets.push(u8::try_from(*sub).ok()?);
+                }
+                let bridge_port = value.as_u64()? as u32;
+                let if_index = *bridge_to_if.get(&bridge_port)?;
+                let mac = octets
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect::<Vec<_>>()
+                    .join(":");
+                Some(MacSighting { mac, if_index })
+            })
+            .collect()
+    }
+}
+
+/// Trunk state per port (vlanTrunkPortDynamicState), keyed by ifIndex. 1 = trunking.
+fn trunk_metrics(resp: &PollResponse) -> Vec<MetricValue> {
+    let root = Oid::parse(OID_VTP_TRUNK).unwrap();
+    resp.walk(&root)
+        .filter_map(|(oid, value)| {
+            if oid.0.len() != root.0.len() + 1 {
+                return None;
+            }
+            let state = value.as_u64()?;
+            Some(MetricValue {
+                name: "if_trunk",
+                interface_index: oid.last(),
+                value: MetricReading::Gauge(state as f64),
+            })
+        })
+        .collect()
+}
+
+/// VLAN number per port (vmVlan), keyed by ifIndex.
+fn vlan_metrics(resp: &PollResponse) -> Vec<MetricValue> {
+    let root = Oid::parse(OID_VM_VLAN).unwrap();
+    resp.walk(&root)
+        .filter_map(|(oid, value)| {
+            if oid.0.len() != root.0.len() + 1 {
+                return None;
+            }
+            let vlan = value.as_u64()?;
+            Some(MetricValue {
+                name: "if_vlan",
+                interface_index: oid.last(),
+                value: MetricReading::Gauge(vlan as f64),
+            })
+        })
+        .collect()
 }
 
 #[cfg(test)]

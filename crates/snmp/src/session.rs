@@ -74,6 +74,38 @@ impl AsyncSnmpSession {
         }
     }
 
+    /// Like `open`, but every request is sent in the given SNMPv3 context
+    /// (for example `vlan-221`). Only SNMPv3 supports contexts.
+    pub async fn open_in_context(
+        addr: &str,
+        creds: &SnmpCredentials,
+        context: &str,
+    ) -> Result<Self, SnmpError> {
+        match creds {
+            SnmpCredentials::V2c { .. } => Err(SnmpError::Build(
+                "per-VLAN MAC collection needs SNMPv3".to_string(),
+            )),
+            SnmpCredentials::V3 {
+                username,
+                auth_protocol,
+                auth_secret,
+                priv_protocol,
+                priv_secret,
+            } => {
+                let cfg = V3Config {
+                    username,
+                    auth_protocol: *auth_protocol,
+                    auth_secret,
+                    priv_protocol: *priv_protocol,
+                    priv_secret,
+                    context_name: Some(context),
+                };
+                let client = crate::client::build_v3(addr, cfg, DEFAULT_TIMEOUT, false).await?;
+                Ok(Self::new(client))
+            }
+        }
+    }
+ 
     /// Convenience constructor still used by integration tests.
     pub async fn open_v2c(addr: &str, community: &str) -> Result<Self, SnmpError> {
         let client = crate::client::build_v2c(addr, community, DEFAULT_TIMEOUT, false).await?;

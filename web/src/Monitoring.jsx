@@ -87,6 +87,8 @@ async function loadPortStates(ids, range, request, token) {
           oper: oper?.value,
           admin: admin?.value,
           observed: oper?.ts,
+          vlan: latestPoint(data, "if_vlan")?.value,
+          trunk: latestPoint(data, "if_trunk")?.value,
         };
       } catch (err) {
         if (err.status === 401) throw err;
@@ -224,6 +226,8 @@ export default function Monitoring({ token, onExpired, request }) {
   const [devices, setDevices] = useState([]);
   const [deviceId, setDeviceId] = useState("");
   const [deviceSearch, setDeviceSearch] = useState("");
+  const [deviceSort, setDeviceSort] = useState("name");
+  const [macs, setMacs] = useState(null);
   const [detail, setDetail] = useState(null);
   const [interfaceId, setInterfaceId] = useState("");
   const [hours, setHours] = useState(1);
@@ -297,6 +301,23 @@ export default function Monitoring({ token, onExpired, request }) {
       active = false;
     };
   }, [deviceId, token, onExpired, request, refresh]);
+
+  useEffect(() => {
+    if (!deviceId || !interfaceId) {
+      setMacs(null);
+      return;
+    }
+    let active = true;
+    setMacs(null);
+    request(`/api/macs?device=${encodeURIComponent(deviceId)}&interface=${encodeURIComponent(interfaceId)}`, { token })
+      .then((rows) => { if (active) setMacs(rows); })
+      .catch((err) => {
+        if (!active) return;
+        if (err.status === 401) onExpired();
+        else setMacs([]);
+      });
+    return () => { active = false; };
+  }, [deviceId, interfaceId, token, onExpired, request, refresh]);
 
   useEffect(() => {
     if (!deviceId || !detail || String(detail.device.id) !== deviceId) return;
@@ -387,12 +408,19 @@ export default function Monitoring({ token, onExpired, request }) {
   );
   const visibleDevices = useMemo(() => {
     const search = deviceSearch.trim().toLowerCase();
-    return devices.filter((device) =>
-      `${device.name} ${device.mgmt_ip} ${device.vendor} ${device.profile}`
-        .toLowerCase()
-        .includes(search),
-    );
-  }, [devices, deviceSearch]);
+    const ipKey = (ip) => ip.split(".").reduce((acc, part) => acc * 256 + Number(part), 0);
+    return devices
+      .filter((device) =>
+        `${device.name} ${device.mgmt_ip} ${device.vendor} ${device.profile}`
+          .toLowerCase()
+          .includes(search),
+      )
+      .sort((a, b) =>
+        deviceSort === "ip"
+          ? ipKey(a.mgmt_ip) - ipKey(b.mgmt_ip)
+          : a.name.localeCompare(b.name),
+      );
+  }, [devices, deviceSearch, deviceSort]);
   const selectedInterface = detail?.interfaces.find(
     (item) => String(item.id) === interfaceId,
   );
@@ -503,6 +531,19 @@ export default function Monitoring({ token, onExpired, request }) {
                 value={deviceSearch}
                 onChange={(event) => setDeviceSearch(event.target.value)}
               />
+                <div className="mt-2 flex gap-2" role="group" aria-label="Sort devices">
+                  {[["name", "Name"], ["ip", "IP"]].map(([key, label]) => (
+                    <button
+                      key={key}
+                      type="button"
+                      aria-pressed={deviceSort === key}
+                      onClick={() => setDeviceSort(key)}
+                      className={`border px-3 py-1 text-xs ${deviceSort === key ? "border-emerald-400 text-emerald-300" : "border-slate-700 text-slate-400"}`}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
             </label>
             <p className="mt-1.5 text-[10px] text-slate-400">
               {visibleDevices.length} of {devices.length} devices
@@ -578,27 +619,29 @@ export default function Monitoring({ token, onExpired, request }) {
                       : ""}
                   </p>
                   <div className="mt-3 grid gap-3 sm:grid-cols-2">
-                    <label>
-                      Time range
-                      <select
-                        className="mt-1"
-                        value={hours}
-                        onChange={(event) => {
-                          setHours(Number(event.target.value));
-                          setTraffic(null);
-                          setResources(null);
-                          setInterfaceHealth(null);
-                          setMetricsLoaded(false);
-                          setMetricError("");
-                        }}
-                      >
+                    <div className="sm:col-span-2">
+                      <span className="text-xs text-slate-400">Time range</span>
+                      <div className="mt-1 flex flex-wrap gap-2" role="group" aria-label="Time range">
                         {RANGES.map((item) => (
-                          <option key={item.hours} value={item.hours}>
+                          <button
+                            key={item.hours}
+                            type="button"
+                            aria-pressed={hours === item.hours}
+                            onClick={() => {
+                              setHours(item.hours);
+                              setTraffic(null);
+                              setResources(null);
+                              setInterfaceHealth(null);
+                              setMetricsLoaded(false);
+                              setMetricError("");
+                            }}
+                            className={`border px-3 py-1 text-xs ${hours === item.hours ? "border-emerald-400 text-emerald-300" : "border-slate-700 text-slate-400"}`}
+                          >
                             {item.label}
-                          </option>
+                          </button>
                         ))}
-                      </select>
-                    </label>
+                      </div>
+                    </div>
                   </div>
                   {selectedInterface && (
                     <p className="mt-2 text-[10px] leading-4 text-slate-400">
@@ -660,6 +703,9 @@ export default function Monitoring({ token, onExpired, request }) {
                           <span className="w-28 text-slate-400">
                             {PORT_STATES[state].label}
                           </span>
+                          <span className="w-20 text-slate-400">
+                            {portStates[item.id]?.trunk === 1 ? "Trunk" : `VLAN ${portStates[item.id]?.vlan ?? "—"}`}
+                          </span>
                           <span className="flex-1 text-right text-slate-400">
                             {item.speed_bps ? rate(item.speed_bps) : "—"}
                           </span>
@@ -714,6 +760,37 @@ export default function Monitoring({ token, onExpired, request }) {
                     </div>
                   </section>
                 )}
+            {interfaceId && (
+              <section className="card">
+                <p className="eyebrow">MAC addresses</p>
+                <h2 className="mt-2 text-sm font-semibold">Devices seen on this port</h2>
+                <p className="mt-1 text-[10px] leading-4 text-slate-400">Learned from each VLAN on the switch. Refreshed every 5 minutes.</p>
+                {macs === null ? (
+                  <div className="chart-empty">Loading MAC addresses…</div>
+                ) : macs.length === 0 ? (
+                  <div className="chart-empty">No MAC addresses seen on this port.</div>
+                ) : (
+                  <table className="mt-3 w-full text-left text-xs">
+                    <thead className="border-b border-slate-800 text-[10px] uppercase tracking-wide text-slate-500">
+                      <tr>
+                        <th className="pb-1.5 pr-3">MAC address</th>
+                        <th className="pb-1.5 pr-3">VLAN</th>
+                        <th className="pb-1.5">Last seen</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-800">
+                      {macs.map((entry) => (
+                        <tr key={entry.mac}>
+                          <td className="py-1.5 pr-3 font-mono">{entry.mac}</td>
+                          <td className="py-1.5 pr-3">{entry.vlan ?? "—"}</td>
+                          <td className="py-1.5 text-slate-400">{new Date(entry.last_seen).toLocaleString()}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )}
+              </section>
+            )}
                 {interfaceId && (
                   <section className="card">
                     <p className="eyebrow">03 / Traffic</p>

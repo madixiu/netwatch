@@ -7,9 +7,10 @@ use chrono::{DateTime, Duration, Utc};
 use netwatch_db::metrics::{self, MetricPoint, SeriesKind};
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
-
+use std::collections::HashMap;
+ 
 use crate::{ApiError, AppState};
-
+ 
 #[derive(sqlx::FromRow, Serialize)]
 pub struct DeviceSummary {
     id: i64,
@@ -24,7 +25,7 @@ pub struct DeviceSummary {
     last_poll: Option<DateTime<Utc>>,
     last_error: Option<String>,
 }
-
+ 
 async fn devices(pool: &PgPool, id: Option<i64>) -> Result<Vec<DeviceSummary>, sqlx::Error> {
     sqlx::query_as(
         "SELECT d.id, d.name, host(d.mgmt_ip) AS mgmt_ip, d.vendor, d.model, d.profile,
@@ -46,13 +47,13 @@ async fn devices(pool: &PgPool, id: Option<i64>) -> Result<Vec<DeviceSummary>, s
     .fetch_all(pool)
     .await
 }
-
+ 
 pub async fn list_devices(
     State(state): State<AppState>,
 ) -> Result<Json<Vec<DeviceSummary>>, ApiError> {
     Ok(Json(devices(&state.pool, None).await?))
 }
-
+ 
 #[derive(sqlx::FromRow, Serialize)]
 pub struct Interface {
     id: i64,
@@ -62,7 +63,7 @@ pub struct Interface {
     first_seen: DateTime<Utc>,
     removed_at: Option<DateTime<Utc>>,
 }
-
+ 
 #[derive(sqlx::FromRow, Serialize)]
 pub struct Probe {
     protocol: String,
@@ -71,14 +72,14 @@ pub struct Probe {
     latency_ms: Option<f64>,
     detail: Option<String>,
 }
-
+ 
 #[derive(sqlx::FromRow, Serialize)]
 pub struct HardwareSnapshot {
     observed_at: DateTime<Utc>,
     status: String,
     detail: Option<String>,
 }
-
+ 
 #[derive(sqlx::FromRow, Serialize)]
 pub struct HardwareComponent {
     entity_index: i32,
@@ -88,7 +89,7 @@ pub struct HardwareComponent {
     value: Option<f64>,
     observed_at: DateTime<Utc>,
 }
-
+ 
 #[derive(Serialize)]
 pub struct DeviceDetail {
     device: DeviceSummary,
@@ -97,7 +98,7 @@ pub struct DeviceDetail {
     hardware: Option<HardwareSnapshot>,
     components: Vec<HardwareComponent>,
 }
-
+ 
 pub async fn device_detail(
     State(state): State<AppState>,
     Path(id): Path<i64>,
@@ -134,7 +135,7 @@ pub async fn device_detail(
         components,
     }))
 }
-
+ 
 #[derive(Deserialize)]
 pub struct RangeQuery {
     device: i64,
@@ -142,7 +143,7 @@ pub struct RangeQuery {
     from: DateTime<Utc>,
     to: DateTime<Utc>,
 }
-
+ 
 #[derive(Serialize)]
 pub struct SeriesResponse {
     source: &'static str,
@@ -150,7 +151,7 @@ pub struct SeriesResponse {
     processed_through: Option<DateTime<Utc>>,
     points: Vec<MetricPoint>,
 }
-
+ 
 async fn series(
     state: &AppState,
     query: RangeQuery,
@@ -217,28 +218,28 @@ async fn series(
         points,
     }))
 }
-
+ 
 pub async fn traffic(
     State(state): State<AppState>,
     Query(query): Query<RangeQuery>,
 ) -> Result<Json<SeriesResponse>, ApiError> {
     series(&state, query, SeriesKind::Traffic).await
 }
-
+ 
 pub async fn resources(
     State(state): State<AppState>,
     Query(query): Query<RangeQuery>,
 ) -> Result<Json<SeriesResponse>, ApiError> {
     series(&state, query, SeriesKind::Resources).await
 }
-
+ 
 pub async fn interface_health(
     State(state): State<AppState>,
     Query(query): Query<RangeQuery>,
 ) -> Result<Json<SeriesResponse>, ApiError> {
     series(&state, query, SeriesKind::InterfaceHealth).await
 }
-
+ 
 #[derive(Serialize)]
 pub struct FleetStatus {
     total: usize,
@@ -249,7 +250,7 @@ pub struct FleetStatus {
     not_polled: usize,
     disabled: usize,
 }
-
+ 
 pub async fn status(State(state): State<AppState>) -> Result<Json<FleetStatus>, ApiError> {
     let list = devices(&state.pool, None).await?;
     let mut result = FleetStatus {
@@ -277,4 +278,183 @@ pub async fn status(State(state): State<AppState>) -> Result<Json<FleetStatus>, 
         }
     }
     Ok(Json(result))
+}
+ 
+#[derive(sqlx::FromRow)]
+struct LoadRow {
+    device_id: i64,
+    forwarding: Option<f64>,
+    cpu_pct: Option<f64>,
+    memory_pct: Option<f64>,
+    in_bps: Option<f64>,
+    out_bps: Option<f64>,
+    ports_total: i64,
+    ports_up: i64,
+    ports_down: i64,
+}
+ 
+#[derive(Serialize)]
+pub struct SwitchOverview {
+    #[serde(flatten)]
+    device: DeviceSummary,
+    /// ipForwarding: 1 = layer 3 (routing), 2 = layer 2 (switching), None = unknown.
+    forwarding: Option<f64>,
+    /// True when the device has samples in the last 5 minutes.
+    sampled: bool,
+    cpu_pct: Option<f64>,
+    memory_pct: Option<f64>,
+    in_bps: Option<f64>,
+    out_bps: Option<f64>,
+    ports_total: i64,
+    ports_up: i64,
+    ports_down: i64,
+}
+ 
+/// Latest-state summary per device over the last 5 minutes of raw samples.
+/// CPU and memory are averaged. Traffic is the sum over interfaces of the
+/// average counter rate (delta / elapsed seconds), converted to bits per second.
+/// Port state uses the most recent ifOperStatus per interface: 1 is up, 2 and 7 are down.
+const OVERVIEW_SQL: &str = r#"
+WITH recent AS (
+    SELECT s.device_id, s.interface_id, m.name, s.value, s.delta, s.dt_seconds, s.ts
+    FROM raw_samples s
+    JOIN metrics_catalog m ON m.id = s.metric_id
+    WHERE s.ts > now() - interval '5 minutes'
+      AND m.name IN ('cpu_5min_pct', 'cpu_load_pct', 'memory_used_pct',
+                     'if_hc_in_octets', 'if_hc_out_octets', 'if_oper_status', 'ip_forwarding')
+),
+cpu AS (
+    SELECT device_id, avg(value) AS cpu_pct
+    FROM recent
+    WHERE name IN ('cpu_5min_pct', 'cpu_load_pct')
+    GROUP BY device_id
+),
+mem AS (
+    SELECT device_id, avg(value) AS memory_pct
+    FROM recent
+    WHERE name = 'memory_used_pct'
+    GROUP BY device_id
+),
+traffic AS (
+    SELECT device_id,
+           sum(rate) FILTER (WHERE name = 'if_hc_in_octets') * 8 AS in_bps,
+           sum(rate) FILTER (WHERE name = 'if_hc_out_octets') * 8 AS out_bps
+    FROM (
+        SELECT device_id, interface_id, name,
+               avg(delta / NULLIF(dt_seconds, 0)) AS rate
+        FROM recent
+        WHERE name IN ('if_hc_in_octets', 'if_hc_out_octets')
+          AND delta IS NOT NULL
+          AND interface_id <> 0
+        GROUP BY device_id, interface_id, name
+    ) per_interface
+    GROUP BY device_id
+),
+fwd AS (
+    SELECT device_id, avg(value) AS forwarding
+    FROM recent
+    WHERE name = 'ip_forwarding'
+    GROUP BY device_id
+),
+ports AS (
+    SELECT device_id,
+           count(*) AS ports_total,
+           count(*) FILTER (WHERE value = 1) AS ports_up,
+           count(*) FILTER (WHERE value IN (2, 7)) AS ports_down
+    FROM (
+        SELECT DISTINCT ON (device_id, interface_id) device_id, interface_id, value
+        FROM recent
+        WHERE name = 'if_oper_status'
+          AND interface_id <> 0
+        ORDER BY device_id, interface_id, ts DESC
+    ) latest
+    GROUP BY device_id
+)
+SELECT d.id AS device_id,
+       cpu.cpu_pct,
+       mem.memory_pct,
+       traffic.in_bps,
+       traffic.out_bps,
+       COALESCE(ports.ports_total, 0) AS ports_total,
+       COALESCE(ports.ports_up, 0) AS ports_up,
+       COALESCE(ports.ports_down, 0) AS ports_down,
+       fwd.forwarding
+FROM devices d
+LEFT JOIN cpu ON cpu.device_id = d.id
+LEFT JOIN mem ON mem.device_id = d.id
+LEFT JOIN traffic ON traffic.device_id = d.id
+LEFT JOIN fwd ON fwd.device_id = d.id
+LEFT JOIN ports ON ports.device_id = d.id
+"#;
+ 
+pub async fn overview(
+    State(state): State<AppState>,
+) -> Result<Json<Vec<SwitchOverview>>, ApiError> {
+    let list = devices(&state.pool, None).await?;
+    let loads: Vec<LoadRow> = sqlx::query_as(OVERVIEW_SQL).fetch_all(&state.pool).await?;
+    let mut by_device: HashMap<i64, LoadRow> = loads
+        .into_iter()
+        .map(|row| (row.device_id, row))
+        .collect();
+ 
+    let result = list
+        .into_iter()
+        .map(|device| match by_device.remove(&device.id) {
+            Some(load) => SwitchOverview {
+                device,
+                forwarding: load.forwarding,
+                sampled: true,
+                cpu_pct: load.cpu_pct,
+                memory_pct: load.memory_pct,
+                in_bps: load.in_bps,
+                out_bps: load.out_bps,
+                ports_total: load.ports_total,
+                ports_up: load.ports_up,
+                ports_down: load.ports_down,
+            },
+            None => SwitchOverview {
+                device,
+                forwarding: None,
+                sampled: false,
+                cpu_pct: None,
+                memory_pct: None,
+                in_bps: None,
+                out_bps: None,
+                ports_total: 0,
+                ports_up: 0,
+                ports_down: 0,
+            },
+        })
+        .collect();
+ 
+    Ok(Json(result))
+}
+ 
+
+#[derive(Deserialize)]
+pub struct MacQuery {
+    device: i64,
+    interface: i64,
+}
+
+#[derive(sqlx::FromRow, Serialize)]
+pub struct MacEntry {
+    mac: String,
+    last_seen: DateTime<Utc>,
+    vlan: Option<i32>,
+}
+
+/// MAC addresses learned on one port (default VLAN only).
+pub async fn interface_macs(
+    State(state): State<AppState>,
+    Query(query): Query<MacQuery>,
+) -> Result<Json<Vec<MacEntry>>, ApiError> {
+    let rows: Vec<MacEntry> = sqlx::query_as(
+        "SELECT mac, last_seen, vlan FROM mac_table WHERE device_id = $1 AND interface_id = $2 ORDER BY mac",
+    )
+    .bind(query.device)
+    .bind(query.interface)
+    .fetch_all(&state.pool)
+    .await?;
+    Ok(Json(rows))
 }

@@ -1,0 +1,154 @@
+use chrono::{DateTime, Duration, Utc};
+use serde::Serialize;
+use sqlx::PgPool;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Source {
+    Raw,
+    Minute,
+    Hour,
+    Day,
+}
+
+impl Source {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Raw => "raw",
+            Self::Minute => "1m",
+            Self::Hour => "1h",
+            Self::Day => "1d",
+        }
+    }
+
+    fn table(self) -> &'static str {
+        match self {
+            Self::Raw => "raw_samples",
+            Self::Minute => "rollup_1m",
+            Self::Hour => "rollup_1h",
+            Self::Day => "rollup_1d",
+        }
+    }
+
+    fn seconds(self) -> i32 {
+        match self {
+            Self::Raw => 0,
+            Self::Minute => 60,
+            Self::Hour => 3600,
+            Self::Day => 86400,
+        }
+    }
+}
+
+pub fn choose_source(range: Duration) -> Source {
+    if range <= Duration::hours(6) {
+        Source::Raw
+    } else if range <= Duration::hours(48) {
+        Source::Minute
+    } else if range <= Duration::days(60) {
+        Source::Hour
+    } else {
+        Source::Day
+    }
+}
+
+#[derive(Debug, sqlx::FromRow, Serialize)]
+pub struct MetricPoint {
+    pub metric: String,
+    pub ts: DateTime<Utc>,
+    pub value: Option<f64>,
+}
+
+#[derive(Clone, Copy)]
+pub enum SeriesKind {
+    Traffic,
+    Resources,
+    InterfaceHealth,
+}
+
+pub async fn series(
+    pool: &PgPool,
+    device_id: i64,
+    interface_id: i64,
+    from: DateTime<Utc>,
+    to: DateTime<Utc>,
+    kind: SeriesKind,
+) -> Result<(Source, Vec<MetricPoint>), sqlx::Error> {
+    let source = choose_source(to - from);
+    let (time, value) = match (source, kind) {
+        (Source::Raw, SeriesKind::Traffic) => ("ts", "s.delta / NULLIF(s.dt_seconds, 0) * 8"),
+        (Source::Raw, SeriesKind::InterfaceHealth) => ("ts", "CASE WHEN m.kind = 'counter' THEN s.delta / NULLIF(s.dt_seconds, 0) ELSE s.value END"),
+        (Source::Raw, _) => ("ts", "s.value"),
+        (_, SeriesKind::Traffic) => ("bucket", "s.sum_delta / NULLIF(s.sum_seconds, 0) * 8"),
+        (_, SeriesKind::InterfaceHealth) => ("bucket", "CASE WHEN m.kind = 'counter' THEN s.sum_delta / NULLIF(s.sum_seconds, 0) WHEN m.name = 'if_oper_status' THEN s.last ELSE s.avg END"),
+        (_, _) => ("bucket", "s.avg"),
+    };
+    let names = match kind {
+        SeriesKind::Traffic => vec!["if_hc_in_octets", "if_hc_out_octets"],
+        SeriesKind::Resources => vec!["cpu_5min_pct", "cpu_load_pct", "memory_used_pct"],
+        SeriesKind::InterfaceHealth => vec![
+            "if_oper_status",
+            "if_vlan",
+            "if_in_util_pct",
+            "if_out_util_pct",
+            "if_in_discards",
+            "if_out_discards",
+            "if_in_errors",
+            "if_out_errors",
+            "if_hc_in_ucast_pkts",
+            "if_hc_in_multicast_pkts",
+            "if_hc_in_broadcast_pkts",
+            "if_hc_out_ucast_pkts",
+            "if_hc_out_multicast_pkts",
+            "if_hc_out_broadcast_pkts",
+        ],
+    };
+    let query = format!(
+        "SELECT m.name AS metric, s.{time} AS ts, {value} AS value
+         FROM {} s JOIN metrics_catalog m ON m.id = s.metric_id
+         WHERE s.device_id = $1 AND s.interface_id = $2 AND m.name = ANY($3)
+           AND (s.interface_id = 0 OR s.mapping_verified)
+           AND s.{time} >= $4 AND s.{time} < $5
+           AND ($6 = 0 OR s.{time} + $6 * interval '1 second' <= $5)
+         ORDER BY s.{time}, m.name LIMIT 100001",
+        source.table()
+    );
+    let points = sqlx::query_as::<_, MetricPoint>(&query)
+        .bind(device_id)
+        .bind(interface_id)
+        .bind(&names)
+        .bind(from)
+        .bind(to)
+        .bind(source.seconds() as f64)
+        .fetch_all(pool)
+        .await?;
+    if points.len() > 100_000 {
+        return Err(sqlx::Error::Protocol(
+            "metric query exceeds 100000 points".into(),
+        ));
+    }
+    Ok((source, points))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn chooses_source_at_range_boundaries() {
+        assert_eq!(choose_source(Duration::hours(6)), Source::Raw);
+        assert_eq!(
+            choose_source(Duration::hours(6) + Duration::seconds(1)),
+            Source::Minute
+        );
+        assert_eq!(choose_source(Duration::hours(48)), Source::Minute);
+        assert_eq!(
+            choose_source(Duration::hours(48) + Duration::seconds(1)),
+            Source::Hour
+        );
+        assert_eq!(choose_source(Duration::days(60)), Source::Hour);
+        assert_eq!(
+            choose_source(Duration::days(60) + Duration::seconds(1)),
+            Source::Day
+        );
+    }
+}

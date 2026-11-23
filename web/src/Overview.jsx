@@ -1,0 +1,206 @@
+import { useEffect, useMemo, useState } from 'react'
+
+const SORTS = [
+  { key: 'name', label: 'Name' },
+  { key: 'ip', label: 'IP' },
+  { key: 'cpu', label: 'CPU' },
+  { key: 'traffic', label: 'Traffic' },
+  { key: 'ports', label: 'Ports down' },
+]
+
+function rate(value) {
+  if (value == null || !Number.isFinite(value)) return '—'
+  if (value >= 1e9) return `${(value / 1e9).toFixed(2)} Gbps`
+  if (value >= 1e6) return `${(value / 1e6).toFixed(2)} Mbps`
+  if (value >= 1e3) return `${(value / 1e3).toFixed(2)} Kbps`
+  return `${value.toFixed(1)} bps`
+}
+
+function percent(value) {
+  return value == null || !Number.isFinite(value) ? '—' : `${value.toFixed(1)}%`
+}
+
+function layerLabel(value) {
+  if (value === 1) return 'Layer 3 (routing)'
+  if (value === 2) return 'Layer 2 (switching)'
+  return 'Layer unknown'
+}
+
+function totalBps(row) {
+  return (row.in_bps || 0) + (row.out_bps || 0)
+}
+
+function ipNumber(ip) {
+  return ip.split('.').reduce((acc, part) => acc * 256 + Number(part), 0)
+}
+
+// Vendor badge with initials. Real vendor logos are trademarks, so they are not used here.
+function vendorBadge(vendor) {
+  const text = (vendor || '').toLowerCase()
+  if (text.includes('cisco')) return { label: 'Cisco', color: 'bg-sky-700' }
+  if (text.includes('mikrotik')) return { label: 'MikroTik', color: 'bg-orange-700' }
+  return { label: vendor || 'Unknown', color: 'bg-slate-600' }
+}
+
+function Ranking({ title, rows, render, empty }) {
+  return (
+    <section className="card">
+      <h3 className="text-sm font-semibold">{title}</h3>
+      <ol className="mt-3 space-y-2 text-sm">
+        {rows.length ? rows.map((row) => (
+          <li key={row.id} className="flex items-center justify-between gap-3">
+            <span className="truncate"><strong>{row.name}</strong> <span className="text-slate-400">{row.mgmt_ip}</span></span>
+            <span className="shrink-0 font-mono text-slate-100">{render(row)}</span>
+          </li>
+        )) : <li className="text-slate-400">{empty}</li>}
+      </ol>
+    </section>
+  )
+}
+
+function SwitchCard({ item }) {
+  const badge = vendorBadge(item.vendor)
+  return (
+    <section className="card">
+      <div className="flex items-start justify-between gap-3">
+        <div className="flex items-center gap-3">
+          <div className={`flex h-10 w-10 shrink-0 items-center justify-center rounded text-xs font-bold text-white ${badge.color}`} aria-label={`${badge.label} switch`}>
+            {badge.label.slice(0, 2).toUpperCase()}
+          </div>
+          <div className="min-w-0">
+            <h3 className="truncate text-base font-semibold">{item.name}</h3>
+            <p className="text-xs text-slate-400">{item.mgmt_ip} · {item.model || item.profile}</p>
+          </div>
+        </div>
+        <span className={`status-tag status-${item.status}`}>{item.status.replace('_', ' ')}</span>
+      </div>
+
+      <div className="mt-4 grid grid-cols-2 gap-3 text-sm">
+        <div><span className="block text-xs text-slate-400">CPU</span><strong>{percent(item.cpu_pct)}</strong></div>
+        <div><span className="block text-xs text-slate-400">Memory</span><strong>{percent(item.memory_pct)}</strong></div>
+        <div><span className="block text-xs text-slate-400">In</span><strong>{rate(item.in_bps)}</strong></div>
+        <div><span className="block text-xs text-slate-400">Out</span><strong>{rate(item.out_bps)}</strong></div>
+      </div>
+
+      <div className="mt-4 flex flex-wrap gap-3 text-xs">
+        <span className="border border-emerald-700 px-2 py-1 text-emerald-300">{item.ports_up} up</span>
+        <span className="border border-rose-800 px-2 py-1 text-rose-300">{item.ports_down} down</span>
+        <span className="border border-slate-700 px-2 py-1 text-slate-400">{item.ports_total} ports</span>
+        <span className="border border-slate-700 px-2 py-1 text-slate-400">{layerLabel(item.forwarding)}</span>
+      </div>
+      {!item.sampled && <p className="mt-3 text-xs text-slate-500">No samples in the last 5 minutes.</p>}
+    </section>
+  )
+}
+
+export default function Overview({ token, onExpired, request }) {
+  const [switches, setSwitches] = useState(null)
+  const [error, setError] = useState('')
+  const [sort, setSort] = useState('name')
+  const [refresh, setRefresh] = useState(0)
+
+  useEffect(() => {
+    const timer = setInterval(() => setRefresh((value) => value + 1), 15000)
+    return () => clearInterval(timer)
+  }, [])
+
+  useEffect(() => {
+    let active = true
+    request('/api/overview', { token })
+      .then((list) => { if (active) { setSwitches(list); setError('') } })
+      .catch((err) => {
+        if (!active) return
+        if (err.status === 401) onExpired()
+        else setError(err.message)
+      })
+    return () => { active = false }
+  }, [token, onExpired, request, refresh])
+
+  const sorted = useMemo(() => {
+    const list = [...(switches || [])]
+    const sorters = {
+      name: (a, b) => a.name.localeCompare(b.name),
+      ip: (a, b) => ipNumber(a.mgmt_ip) - ipNumber(b.mgmt_ip),
+      cpu: (a, b) => (b.cpu_pct ?? -1) - (a.cpu_pct ?? -1),
+      traffic: (a, b) => totalBps(b) - totalBps(a),
+      ports: (a, b) => b.ports_down - a.ports_down,
+    }
+    return list.sort(sorters[sort])
+  }, [switches, sort])
+
+  const rankings = useMemo(() => {
+    const all = switches || []
+    const sampled = all.filter((item) => item.sampled)
+    const withCpu = sampled.filter((item) => item.cpu_pct != null)
+    const withTraffic = sampled.filter((item) => totalBps(item) > 0)
+    const top = (list) => list.slice(0, 5)
+    return {
+      worstCpu: top([...withCpu].sort((a, b) => b.cpu_pct - a.cpu_pct)),
+      bestCpu: top([...withCpu].sort((a, b) => a.cpu_pct - b.cpu_pct)),
+      busiest: top([...withTraffic].sort((a, b) => totalBps(b) - totalBps(a))),
+      quietest: top([...withTraffic].sort((a, b) => totalBps(a) - totalBps(b))),
+      portsDown: top(all.filter((item) => item.ports_down > 0).sort((a, b) => b.ports_down - a.ports_down)),
+    }
+  }, [switches])
+
+  const summary = useMemo(() => {
+    const all = switches || []
+    const cpuValues = all.filter((item) => item.cpu_pct != null).map((item) => item.cpu_pct)
+    return {
+      total: all.length,
+      ok: all.filter((item) => item.status === 'ok').length,
+      attention: all.filter((item) => item.status !== 'ok').length,
+      avgCpu: cpuValues.length ? cpuValues.reduce((a, b) => a + b, 0) / cpuValues.length : null,
+    }
+  }, [switches])
+
+  return (
+    <main className="mx-auto max-w-7xl space-y-6 px-4 py-8 sm:px-8 sm:py-10">
+      <div>
+        <p className="eyebrow">Overview <span className="text-slate-500">//</span> switches</p>
+        <h1 className="mt-3 text-3xl font-semibold sm:text-4xl">Switch overview<span className="cursor-mark" aria-hidden="true">_</span></h1>
+        <p className="mt-3 text-sm text-slate-400">Load and traffic over the last 5 minutes. Refreshes every 15 seconds.</p>
+      </div>
+
+      {error && <div role="alert" className="border border-rose-800 bg-rose-950/50 p-4 text-sm text-rose-200">{error}</div>}
+
+      <div className="console-summary" aria-label="Overview summary">
+        <div><span>Switches</span><strong>{switches ? summary.total : '—'}</strong></div>
+        <div><span>Poll OK</span><strong>{switches ? summary.ok : '—'}</strong></div>
+        <div><span>Average CPU</span><strong>{percent(summary.avgCpu)}</strong></div>
+      </div>
+
+      {!switches ? (
+        <div className="card text-sm text-slate-400">{error ? 'Unable to load overview. Retrying automatically.' : 'Loading switches…'}</div>
+      ) : switches.length === 0 ? (
+        <div className="card text-sm text-slate-400">No monitored switches yet. Approve a discovered device in the scan console.</div>
+      ) : (
+        <>
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
+            <Ranking title="Highest CPU (worst)" rows={rankings.worstCpu} render={(row) => percent(row.cpu_pct)} empty="No CPU samples yet." />
+            <Ranking title="Lowest CPU (best)" rows={rankings.bestCpu} render={(row) => percent(row.cpu_pct)} empty="No CPU samples yet." />
+            <Ranking title="Busiest traffic" rows={rankings.busiest} render={(row) => rate(totalBps(row))} empty="No traffic samples yet." />
+            <Ranking title="Quietest traffic" rows={rankings.quietest} render={(row) => rate(totalBps(row))} empty="No traffic samples yet." />
+            <Ranking title="Most ports down" rows={rankings.portsDown} render={(row) => `${row.ports_down} down`} empty="No ports are down." />
+          </div>
+
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <h2 className="text-lg font-semibold">All switches</h2>
+            <div className="flex flex-wrap gap-2" role="group" aria-label="Sort switches">
+              {SORTS.map((item) => (
+                <button key={item.key} aria-pressed={sort === item.key} onClick={() => setSort(item.key)}
+                  className={`border px-3 py-1 text-xs ${sort === item.key ? 'border-emerald-400 text-emerald-300' : 'border-slate-700 text-slate-400'}`}>
+                  {item.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
+            {sorted.map((item) => <SwitchCard key={item.id} item={item} />)}
+          </div>
+        </>
+      )}
+    </main>
+  )
+}

@@ -1,0 +1,1 @@
+ALTER TABLE mac_table ADD COLUMN vlan INTEGER;
