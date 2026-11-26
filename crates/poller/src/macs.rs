@@ -20,7 +20,7 @@ use netwatch_crypto::SecretKey;
 use netwatch_db::{credentials, mac_table};
 use netwatch_snmp::{AsyncSnmpSession, SnmpClient, VarBind};
 
-const INTERVAL: Duration = Duration::from_secs(300);
+const INTERVAL: Duration = Duration::from_secs(900);
 
 /// vmVlan: VLAN of each port, indexed by ifIndex (Cisco).
 const OID_VM_VLAN: &str = "1.3.6.1.4.1.9.9.68.1.2.2.1.2";

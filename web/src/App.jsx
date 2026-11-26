@@ -403,7 +403,7 @@ function Dashboard({ token, user, onLogout, onExpired, page, setPage }) {
       }
     }
     update();
-    const timer = setInterval(update, 2000);
+    const timer = setInterval(update, 10000);
     return () => {
       disposed = true;
       clearInterval(timer);

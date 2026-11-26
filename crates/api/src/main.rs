@@ -9,7 +9,7 @@ use tracing_subscriber::EnvFilter;
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env())
+        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn,async_snmp=off")))
         .json()
         .init();
     let url = std::env::var("DATABASE_URL").context("DATABASE_URL is required")?;

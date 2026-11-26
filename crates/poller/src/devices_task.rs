@@ -338,7 +338,7 @@ pub async fn run(
                             }
                             Err(e) => {
                                 warn!(device = %device.name, error = %e, "interface discovery failed; retaining previous snapshot");
-                                next_discovery_at = tokio::time::Instant::now() + Duration::from_secs(30);
+                                next_discovery_at = tokio::time::Instant::now() + Duration::from_secs(300);
                             }
                         }
 

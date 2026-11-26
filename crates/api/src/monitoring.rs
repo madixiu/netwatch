@@ -319,7 +319,7 @@ WITH recent AS (
     SELECT s.device_id, s.interface_id, m.name, s.value, s.delta, s.dt_seconds, s.ts
     FROM raw_samples s
     JOIN metrics_catalog m ON m.id = s.metric_id
-    WHERE s.ts > now() - interval '5 minutes'
+    WHERE s.ts > now() - interval '15 minutes'
       AND m.name IN ('cpu_5min_pct', 'cpu_load_pct', 'memory_used_pct',
                      'if_hc_in_octets', 'if_hc_out_octets', 'if_oper_status', 'ip_forwarding')
 ),

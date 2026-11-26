@@ -100,7 +100,7 @@ export default function Overview({ token, onExpired, request }) {
   const [refresh, setRefresh] = useState(0)
 
   useEffect(() => {
-    const timer = setInterval(() => setRefresh((value) => value + 1), 15000)
+    const timer = setInterval(() => setRefresh((value) => value + 1), 60000)
     return () => clearInterval(timer)
   }, [])
 

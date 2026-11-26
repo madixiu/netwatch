@@ -31,7 +31,6 @@ use crate::counters::CounterTracker;
 mod tests;
 
 struct PollState {
-    last_macs: Vec<netwatch_profiles::MacSighting>,
     interfaces: Vec<InterfaceRef>,
     interface_ids: HashMap<u32, i64>,
     counters: CounterTracker,
@@ -161,7 +160,6 @@ async fn poll_once(
 
     let resp = PollResponse { values };
     let parsed = profile.parse(&resp);
-    state.last_macs = profile.parse_macs(&resp);
 
     let mut seen = std::collections::HashSet::new();
     let mut missing_continuity = 0;
@@ -288,7 +286,6 @@ pub async fn run(
 ) -> Result<()> {
     let interval = Duration::from_secs(device.poll_interval_secs.max(1));
     let mut state = PollState {
-                last_macs: Vec::new(),
         interfaces: Vec::new(),
         interface_ids: HashMap::new(),
         counters: CounterTracker::default(),
@@ -349,11 +346,6 @@ pub async fn run(
 
                     let started = tokio::time::Instant::now();
                     let result = poll_once(&device, profile.as_ref(), &client, &metric_ids, &mut state).await;
-                    if result.is_ok() {
-                        if let Err(e) = write_macs(&pool, device.id, &state).await {
-                            warn!(device = %device.name, error = %e, "failed to write MAC table");
-                        }
-                    }
                     let duration = i32::try_from(started.elapsed().as_millis()).unwrap_or(i32::MAX);
                     if let Ok(PollOutcome { snmp_probe: Some((status, latency, detail)), .. }) = &result {
                         if let Err(e) = netwatch_db::probes::record(&pool, device.id, "snmp", status, *latency, *detail).await {
@@ -396,23 +388,4 @@ pub async fn run(
             }
         }
     }
-}
-
-/// Store the MAC addresses from this poll. An empty list leaves the table as it is.
-async fn write_macs(pool: &PgPool, device_id: i64, state: &PollState) -> Result<()> {
-    if state.last_macs.is_empty() {
-        return Ok(());
-    }
-    let rows: Vec<(i64, String)> = state
-        .last_macs
-        .iter()
-        .filter_map(|sighting| {
-            state
-                .interface_ids
-                .get(&sighting.if_index)
-                .map(|id| (*id, sighting.mac.clone()))
-        })
-        .collect();
-    netwatch_db::mac_table::replace_for_device(pool, device_id, &rows).await?;
-    Ok(())
 }

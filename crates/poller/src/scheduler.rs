@@ -38,7 +38,7 @@ pub async fn run(
     let mut active = HashSet::new();
     let mut icmp_tasks: JoinSet<(i64, Result<()>)> = JoinSet::new();
     let mut icmp_active = HashSet::new();
-    let icmp_limit = Arc::new(Semaphore::new(64));
+    let icmp_limit = Arc::new(Semaphore::new(4));
     let mut ticker = tokio::time::interval(Duration::from_secs(5));
 
     loop {

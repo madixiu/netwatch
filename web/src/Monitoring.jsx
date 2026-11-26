@@ -245,7 +245,7 @@ export default function Monitoring({ token, onExpired, request }) {
   const [portSearch, setPortSearch] = useState("");
 
   useEffect(() => {
-    const timer = setInterval(() => setRefresh((value) => value + 1), 15000);
+    const timer = setInterval(() => setRefresh((value) => value + 1), 60000);
     return () => clearInterval(timer);
   }, []);
 
@@ -338,7 +338,7 @@ export default function Monitoring({ token, onExpired, request }) {
     return () => {
       active = false;
     };
-  }, [deviceId, detail, token, onExpired, request, refresh]);
+  }, [deviceId, detail, token, onExpired, request, Math.floor(refresh / 5)]);
 
   useEffect(() => {
     if (!deviceId) {

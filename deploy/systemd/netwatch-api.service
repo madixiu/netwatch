@@ -12,6 +12,7 @@ ExecStart=/opt/netwatch/bin/netwatch-api
 Restart=on-failure
 RestartSec=5
 NoNewPrivileges=yes
+LimitNOFILE=65536
 PrivateTmp=yes
 
 [Install]

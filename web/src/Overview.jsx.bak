@@ -20,6 +20,12 @@ function percent(value) {
   return value == null || !Number.isFinite(value) ? '—' : `${value.toFixed(1)}%`
 }
 
+function layerLabel(value) {
+  if (value === 1) return 'Layer 3 (routing)'
+  if (value === 2) return 'Layer 2 (switching)'
+  return 'Layer unknown'
+}
+
 function totalBps(row) {
   return (row.in_bps || 0) + (row.out_bps || 0)
 }
@@ -80,7 +86,7 @@ function SwitchCard({ item }) {
         <span className="border border-emerald-700 px-2 py-1 text-emerald-300">{item.ports_up} up</span>
         <span className="border border-rose-800 px-2 py-1 text-rose-300">{item.ports_down} down</span>
         <span className="border border-slate-700 px-2 py-1 text-slate-400">{item.ports_total} ports</span>
-        <span className="border border-slate-700 px-2 py-1 text-slate-500">Layer 2/3: not collected yet</span>
+        <span className="border border-slate-700 px-2 py-1 text-slate-400">{layerLabel(item.forwarding)}</span>
       </div>
       {!item.sampled && <p className="mt-3 text-xs text-slate-500">No samples in the last 5 minutes.</p>}
     </section>

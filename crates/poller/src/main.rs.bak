@@ -6,6 +6,7 @@ mod fake;
 mod hardware;
 mod icmp;
 mod interfaces;
+mod macs;
 mod jobs;
 mod scan_worker;
 mod scheduler;

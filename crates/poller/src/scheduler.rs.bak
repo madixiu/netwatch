@@ -96,6 +96,14 @@ pub async fn run(
                                     let ids = metric_ids.clone();
                                     let rx = shutdown.clone();
                                     active.insert(id);
+                                    let mac_rx = shutdown.clone();
+                                    tokio::spawn(crate::macs::run(
+                                        pool.clone(),
+                                        device.id,
+                                        device.mgmt_ip.clone(),
+                                        key.clone(),
+                                        mac_rx,
+                                    ));
                                     tasks.spawn(async move {
                                         (id, crate::devices_task::run(p, device, profile, client, ids, rx).await)
                                     });
