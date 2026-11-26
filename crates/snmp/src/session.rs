@@ -75,16 +75,19 @@ impl AsyncSnmpSession {
     }
 
     /// Like `open`, but every request is sent in the given SNMPv3 context
-    /// (for example `vlan-221`). Only SNMPv3 supports contexts.
+    /// (for example `vlan-221`). SNMPv2c uses `community@vlan` instead.
     pub async fn open_in_context(
         addr: &str,
         creds: &SnmpCredentials,
         context: &str,
     ) -> Result<Self, SnmpError> {
         match creds {
-            SnmpCredentials::V2c { .. } => Err(SnmpError::Build(
-                "per-VLAN MAC collection needs SNMPv3".to_string(),
-            )),
+            SnmpCredentials::V2c { community } => {
+                // Cisco selects the VLAN bridge table with community@vlan.
+                let vlan = context.strip_prefix("vlan-").unwrap_or(context);
+                let indexed = format!("{}@{vlan}", community.as_str());
+                Self::open_v2c(addr, &indexed).await
+            }
             SnmpCredentials::V3 {
                 username,
                 auth_protocol,

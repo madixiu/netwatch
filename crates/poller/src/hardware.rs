@@ -15,6 +15,29 @@ const PRECISION: &str = "1.3.6.1.2.1.99.1.1.1.1.3";
 const VALUE: &str = "1.3.6.1.2.1.99.1.1.1.1.4";
 const SENSOR_STATUS: &str = "1.3.6.1.2.1.99.1.1.1.1.5";
 
+// CISCO-ENVMON-MIB: used when ENTITY-MIB/ENTITY-SENSOR-MIB report nothing (common on Cisco switches).
+const ENV_TEMP_DESCR: &str = "1.3.6.1.4.1.9.9.13.1.3.1.2";
+const ENV_TEMP_VALUE: &str = "1.3.6.1.4.1.9.9.13.1.3.1.3";
+const ENV_TEMP_STATE: &str = "1.3.6.1.4.1.9.9.13.1.3.1.6";
+const ENV_FAN_DESCR: &str = "1.3.6.1.4.1.9.9.13.1.4.1.2";
+const ENV_FAN_STATE: &str = "1.3.6.1.4.1.9.9.13.1.4.1.3";
+const ENV_PSU_DESCR: &str = "1.3.6.1.4.1.9.9.13.1.5.1.2";
+const ENV_PSU_STATE: &str = "1.3.6.1.4.1.9.9.13.1.5.1.3";
+// CISCO-ENTITY-FRU-CONTROL-MIB: fan tray and power supply status on newer Catalyst models.
+const FRU_FAN_STATUS: &str = "1.3.6.1.4.1.9.9.117.1.4.1.1.1";
+const FRU_POWER_STATUS: &str = "1.3.6.1.4.1.9.9.117.1.1.2.1.2";
+const ENV_ROOTS: [&str; 9] = [
+    FRU_FAN_STATUS,
+    FRU_POWER_STATUS,
+    ENV_TEMP_DESCR,
+    ENV_TEMP_VALUE,
+    ENV_TEMP_STATE,
+    ENV_FAN_DESCR,
+    ENV_FAN_STATE,
+    ENV_PSU_DESCR,
+    ENV_PSU_STATE,
+];
+
 #[derive(Debug)]
 struct Component {
     index: i32,
@@ -71,6 +94,10 @@ fn components(columns: &HashMap<&str, Vec<VarBind>>) -> Vec<Component> {
                     Some(4) => Some("testing"),
                     _ => None,
                 };
+                let status = status.or_else(|| {
+                    let root = if class == 6 { FRU_POWER_STATUS } else { FRU_FAN_STATUS };
+                    fru_state(class == 6, integer(&map(root), index))
+                });
                 (if class == 6 { "power" } else { "fan" }, status, None)
             }
             Some(8) if integer(&types, index) == Some(8) => {
@@ -117,45 +144,145 @@ fn components(columns: &HashMap<&str, Vec<VarBind>>) -> Vec<Component> {
             value,
         });
     }
+    add_fru(columns, &names, &mut result);
+    add_envmon(columns, &mut result);
     result.sort_by_key(|item| item.index);
     result
+}
+
+fn fru_state(power: bool, state: Option<i64>) -> Option<&'static str> {
+    match (power, state?) {
+        (true, 2) => Some("enabled"),
+        (true, 3) => Some("disabled"),
+        (true, 8) => Some("failed"),
+        (true, 9) => Some("on, fan failed"),
+        (true, 1 | 4..=7 | 10..=12) => Some("off"),
+        (false, 2) => Some("enabled"),
+        (false, 3) => Some("failed"),
+        (false, 4) => Some("warning"),
+        (false, 1) => Some("unknown"),
+        _ => None,
+    }
+}
+
+/// Fan trays and power supplies reported only through CISCO-ENTITY-FRU-CONTROL.
+fn add_fru(
+    columns: &HashMap<&str, Vec<VarBind>>,
+    names: &HashMap<u32, Option<SnmpValue>>,
+    result: &mut Vec<Component>,
+) {
+    for (kind, root) in [("fan", FRU_FAN_STATUS), ("power", FRU_POWER_STATUS)] {
+        let states = rows(root, columns.get(root).map(Vec::as_slice).unwrap_or(&[]));
+        for &index in states.keys() {
+            let Some(status) = fru_state(kind == "power", integer(&states, index)) else { continue };
+            if result.iter().any(|c| c.kind == kind && c.index == index as i32) {
+                continue;
+            }
+            let name = names
+                .get(&index)
+                .and_then(Option::as_ref)
+                .and_then(SnmpValue::as_str_lossy)
+                .filter(|s| !s.trim().is_empty())
+                .map(|s| s.into_owned())
+                .unwrap_or_else(|| format!("Entity {index}"));
+            result.push(Component { index: index as i32, kind, name, status: Some(status), value: None });
+        }
+    }
+}
+
+fn envmon_state(state: Option<i64>) -> Option<&'static str> {
+    match state? {
+        1 => Some("ok"),
+        2 => Some("warning"),
+        3 => Some("critical"),
+        4 => Some("shutdown"),
+        5 => Some("not present"),
+        6 => Some("not functioning"),
+        _ => None,
+    }
+}
+
+/// Adds CISCO-ENVMON readings for kinds the standard MIBs did not provide.
+/// Indexes are offset so they cannot collide with entity indexes.
+fn add_envmon(columns: &HashMap<&str, Vec<VarBind>>, result: &mut Vec<Component>) {
+    let map = |name| rows(name, columns.get(name).map(Vec::as_slice).unwrap_or(&[]));
+    let kinds = [
+        ("temperature", 1_000_000, ENV_TEMP_DESCR, ENV_TEMP_STATE),
+        ("fan", 2_000_000, ENV_FAN_DESCR, ENV_FAN_STATE),
+        ("power", 3_000_000, ENV_PSU_DESCR, ENV_PSU_STATE),
+    ];
+    for (kind, offset, descr_root, state_root) in kinds {
+        if result.iter().any(|c| c.kind == kind) {
+            continue;
+        }
+        let descrs = map(descr_root);
+        let states = map(state_root);
+        let temps = map(ENV_TEMP_VALUE);
+        for &index in states.keys() {
+            let state = integer(&states, index);
+            let value = if kind == "temperature" && !matches!(state, Some(5 | 6)) {
+                integer(&temps, index).map(|v| v as f64)
+            } else {
+                None
+            };
+            let name = descrs
+                .get(&index)
+                .and_then(Option::as_ref)
+                .and_then(SnmpValue::as_str_lossy)
+                .filter(|s| !s.trim().is_empty())
+                .map(|s| s.into_owned())
+                .unwrap_or_else(|| format!("{kind} {index}"));
+            result.push(Component {
+                index: offset + index as i32,
+                kind,
+                name,
+                status: envmon_state(state),
+                value,
+            });
+        }
+    }
 }
 
 pub async fn collect(pool: &PgPool, device_id: i64, client: &dyn SnmpClient) -> Result<()> {
     let mut columns = HashMap::new();
     let mut failed = Vec::new();
-    for root in [
-        CLASS,
-        NAME,
-        OPER,
-        TYPE,
-        SCALE,
-        PRECISION,
-        VALUE,
-        SENSOR_STATUS,
-    ] {
-        match client.walk(&Oid::parse(root)?).await {
-            Ok(values) => {
-                let no_entities = root == CLASS && values.is_empty();
-                columns.insert(root, values);
-                if no_entities {
-                    break;
-                }
-            }
-            Err(error) => {
-                warn!(device_id, %root, %error, "hardware health column unavailable");
-                failed.push(root);
-                if root == CLASS {
-                    break;
+    let mut class_ok = false;
+    match client.walk(&Oid::parse(CLASS)?).await {
+        Ok(values) => {
+            class_ok = true;
+            let has_entities = !values.is_empty();
+            columns.insert(CLASS, values);
+            if has_entities {
+                for root in [NAME, OPER, TYPE, SCALE, PRECISION, VALUE, SENSOR_STATUS] {
+                    match client.walk(&Oid::parse(root)?).await {
+                        Ok(values) => {
+                            columns.insert(root, values);
+                        }
+                        Err(error) => {
+                            warn!(device_id, %root, %error, "hardware health column unavailable");
+                            failed.push(root);
+                        }
+                    }
                 }
             }
         }
+        Err(error) => {
+            warn!(device_id, root = CLASS, %error, "hardware health column unavailable");
+            failed.push(CLASS);
+        }
     }
-    let class_ok = columns.contains_key(CLASS);
-    let empty = columns.get(CLASS).is_some_and(Vec::is_empty);
-    let status = if !class_ok {
+    let mut env_ok = false;
+    for root in ENV_ROOTS {
+        if let Ok(values) = client.walk(&Oid::parse(root)?).await {
+            env_ok = true;
+            columns.insert(root, values);
+        }
+    }
+    let found = components(&columns);
+    let readable = class_ok || env_ok;
+    let status = if !readable {
         "error"
-    } else if empty {
+    } else if found.is_empty() {
         "unavailable"
     } else if failed.is_empty() {
         "ok"
@@ -165,12 +292,12 @@ pub async fn collect(pool: &PgPool, device_id: i64, client: &dyn SnmpClient) -> 
     let detail =
         (!failed.is_empty()).then(|| format!("SNMP columns unavailable: {}", failed.join(", ")));
     let mut tx = pool.begin().await?;
-    if class_ok {
+    if readable {
         sqlx::query("DELETE FROM hardware_components WHERE device_id = $1")
             .bind(device_id)
             .execute(&mut *tx)
             .await?;
-        for component in components(&columns) {
+        for component in found {
             sqlx::query("INSERT INTO hardware_components (device_id, entity_index, kind, name, status, value) VALUES ($1, $2, $3, $4, $5, $6)")
                 .bind(device_id).bind(component.index).bind(component.kind).bind(component.name).bind(component.status).bind(component.value)
                 .execute(&mut *tx).await?;

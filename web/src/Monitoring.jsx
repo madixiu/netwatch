@@ -774,6 +774,7 @@ export default function Monitoring({ token, onExpired, request }) {
                     <thead className="border-b border-slate-800 text-[10px] uppercase tracking-wide text-slate-500">
                       <tr>
                         <th className="pb-1.5 pr-3">MAC address</th>
+                        <th className="pb-1.5 pr-3">Switch</th>
                         <th className="pb-1.5 pr-3">VLAN</th>
                         <th className="pb-1.5">Last seen</th>
                       </tr>
@@ -782,6 +783,7 @@ export default function Monitoring({ token, onExpired, request }) {
                       {macs.map((entry) => (
                         <tr key={entry.mac}>
                           <td className="py-1.5 pr-3 font-mono">{entry.mac}</td>
+                          <td className="py-1.5 pr-3">{entry.device_name ?? "—"}</td>
                           <td className="py-1.5 pr-3">{entry.vlan ?? "—"}</td>
                           <td className="py-1.5 text-slate-400">{new Date(entry.last_seen).toLocaleString()}</td>
                         </tr>

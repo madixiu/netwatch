@@ -442,15 +442,19 @@ pub struct MacEntry {
     mac: String,
     last_seen: DateTime<Utc>,
     vlan: Option<i32>,
+    device_name: Option<String>,
 }
 
-/// MAC addresses learned on one port (default VLAN only).
+/// MAC addresses learned on one port, with the name of the monitored switch that owns each one.
 pub async fn interface_macs(
     State(state): State<AppState>,
     Query(query): Query<MacQuery>,
 ) -> Result<Json<Vec<MacEntry>>, ApiError> {
     let rows: Vec<MacEntry> = sqlx::query_as(
-        "SELECT mac, last_seen, vlan FROM mac_table WHERE device_id = $1 AND interface_id = $2 ORDER BY mac",
+        "SELECT m.mac, m.last_seen, m.vlan, \
+         (SELECT d.name FROM device_macs dm JOIN devices d ON d.id = dm.device_id \
+          WHERE dm.mac = m.mac AND dm.device_id <> m.device_id ORDER BY d.name LIMIT 1) AS device_name \
+         FROM mac_table m WHERE m.device_id = $1 AND m.interface_id = $2 ORDER BY m.mac",
     )
     .bind(query.device)
     .bind(query.interface)
